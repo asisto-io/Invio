@@ -46,11 +46,11 @@
         {{#logoUrl}}<img src="{{logoUrl}}" alt="{{companyName}}" />{{/logoUrl}}
       </div>
 
-      <div class="company-details multiline">
+      <div class="company-details">
         <strong>{{companyName}}</strong>
-          {{#companyAddress}}<p>{{companyAddress}}</p>{{/companyAddress}}
-            {{#companyPostalCity}}<p>{{companyPostalCity}}</p>{{/companyPostalCity}}
-            {{#companyTaxId}}<p>Tax ID (EIN): {{companyTaxId}}</p>{{/companyTaxId}}
+          {{#companyAddress}}<div>{{companyAddress}}</div>{{/companyAddress}}
+            {{#companyPostalCity}}<div>{{companyPostalCity}}</div>{{/companyPostalCity}}
+            {{#companyTaxId}}<div>Tax ID (EIN): {{companyTaxId}}</div>{{/companyTaxId}}
       </div>
     </div>
 
@@ -59,13 +59,13 @@
       <div class="bill-to">
         <h3>{{labels.billToHeading}}</h3>
         <strong>{{customerName}}</strong>
-        {{#customerEmail}}<p>{{customerEmail}}</p>{{/customerEmail}}
-        {{#customerContactName}}<p>{{customerContactName}}</p>{{/customerContactName}}
-        {{#customerPhone}}<p>{{customerPhone}}</p>{{/customerPhone}}
-        {{#customerAddress}}<p>{{customerAddress}}</p>{{/customerAddress}}
-        {{#customerPostalCity}}<p>{{customerPostalCity}}</p>{{/customerPostalCity}}
-        {{#customerCountryCode}}<p>{{customerCountryCode}}</p>{{/customerCountryCode}}
-  {{#customerTaxId}}<p>{{labels.taxIdLabel}}: {{customerTaxId}}</p>{{/customerTaxId}}
+        {{#customerEmail}}<div>{{customerEmail}}</div>{{/customerEmail}}
+        {{#customerContactName}}<div>{{customerContactName}}</div>{{/customerContactName}}
+        {{#customerPhone}}<div>{{customerPhone}}</div>{{/customerPhone}}
+        {{#customerAddress}}<div>{{customerAddress}}</div>{{/customerAddress}}
+        {{#customerPostalCity}}<div>{{customerPostalCity}}</div>{{/customerPostalCity}}
+        {{#customerCountryCode}}<div>{{customerCountryCode}}</div>{{/customerCountryCode}}
+  {{#customerTaxId}}<div>{{labels.taxIdLabel}}: {{customerTaxId}}</div>{{/customerTaxId}}
       </div>
 
       <div class="invoice-details">
