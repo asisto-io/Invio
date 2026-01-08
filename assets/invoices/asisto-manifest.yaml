@@ -4,7 +4,8 @@ version: "1.0.0"
 invio: ">=0.1.0"
 
 html:
-  path: index.html
+  path: asisto.html
+  url: "https://raw.githubusercontent.com/asisto-io/Invio/refs/heads/main/assets/invoices/asisto.html"
 
 source:
   manifestUrl: "https://raw.githubusercontent.com/asisto-io/Invio/refs/heads/main/assets/invoices/asisto-manifest.yaml"
