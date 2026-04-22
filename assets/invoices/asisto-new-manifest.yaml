@@ -1,0 +1,10 @@
+id: asisto-invoice-new
+name: "ASISTO Invoice (New)"
+version: "1.0.0"
+invio: ">=0.1.0"
+
+html:
+  path: asisto-new.html
+
+source:
+  manifestUrl: "https://raw.githubusercontent.com/asisto-io/Invio/refs/heads/main/assets/invoices/asisto-new-manifest.yaml"
