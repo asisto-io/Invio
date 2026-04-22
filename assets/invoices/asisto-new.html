@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="{{locale}}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{labels.invoiceTitle}} {{invoiceNumber}}</title>
+
+  <style>
+    /* ─── Fonts (embedded via Google Fonts; works in most HTML-to-PDF renderers
+           like Puppeteer/Chromium. If your renderer blocks external fonts,
+           switch these to self-hosted @font-face or fall back to Georgia.) ─ */
+    @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+    * {
+      box-sizing: border-box;
+    }
+
+    @page {
+      size: A4;
+      margin: 14mm 14mm 12mm 14mm;
+    }
+
+    :root {
+      --ink: #0b0b0a;
+      --bone: #f2efe8;
+      --line: #e5e3dc;
+      --dim: #6b6b66;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+      color: var(--ink);
+      font-family: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .invoice-container {
+      max-width: 190mm;
+      margin: 0 auto;
+      padding-top: 4mm;
+    }
+
+    /* ─── HEADER ───────────────────────────────────────── */
+    .invoice-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding-bottom: 18px;
+      border-bottom: 2px solid var(--ink);
+      margin-bottom: 28px;
+    }
+
+    .logo {
+      font-family: 'Fraunces', Georgia, serif;
+      font-weight: 900;
+      font-size: 32px;
+      letter-spacing: -0.03em;
+      line-height: 1;
+      color: var(--ink);
+    }
+    .logo img {
+      max-height: 44px;
+      display: block;
+    }
+    .logo .dot {
+      color: var(--ink);
+    }
+
+    .company-details {
+      text-align: right;
+      font-size: 10px;
+      line-height: 1.7;
+      color: var(--dim);
+    }
+    .company-details strong {
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.02em;
+    }
+
+    /* ─── BILL TO + META ───────────────────────────────── */
+    .info-section {
+      display: flex;
+      justify-content: space-between;
+      gap: 32px;
+      margin-bottom: 36px;
+    }
+
+    .bill-to,
+    .invoice-details {
+      width: 48%;
+    }
+
+    h3 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--dim);
+      margin: 0 0 10px 0;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h4 {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--dim);
+      margin: 0 0 12px 0;
+    }
+
+    .bill-to strong {
+      font-family: 'Fraunces', Georgia, serif;
+      font-weight: 600;
+      font-size: 15px;
+      letter-spacing: -0.01em;
+      display: block;
+      margin-bottom: 4px;
+      color: var(--ink);
+    }
+
+    .invoice-details div {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      border-bottom: 1px dotted var(--line);
+      font-size: 11px;
+    }
+    .invoice-details div:last-child {
+      border-bottom: none;
+    }
+    .invoice-details strong {
+      font-weight: 500;
+      color: var(--dim);
+      text-transform: uppercase;
+      font-size: 9px;
+      letter-spacing: 0.12em;
+    }
+
+    /* ─── ITEMS TABLE ──────────────────────────────────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 28px;
+    }
+
+    thead th {
+      text-align: left;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 500;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--dim);
+      border-bottom: 1px solid var(--ink);
+      padding: 0 8px 10px 0;
+    }
+
+    tbody td {
+      padding: 12px 8px 12px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 11px;
+      vertical-align: top;
+      white-space: nowrap;
+    }
+    tbody tr td:first-child {
+      font-family: 'Fraunces', Georgia, serif;
+      font-size: 13px;
+      font-weight: 400;
+      letter-spacing: -0.005em;
+      white-space: normal;
+    }
+
+    tfoot td {
+      border-bottom: none;
+      padding: 6px 8px 6px 0;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    tfoot tr:first-child td {
+      padding-top: 14px;
+    }
+
+    .label {
+      text-align: right;
+      padding-right: 12px;
+      color: var(--dim);
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 9px;
+    }
+
+    tfoot tr:last-child td {
+      border-top: 2px solid var(--ink);
+      padding-top: 14px;
+      padding-bottom: 4px;
+    }
+    tfoot tr:last-child .label strong {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--ink);
+      font-weight: 700;
+    }
+    tfoot tr:last-child td:last-child strong {
+      font-family: 'Fraunces', Georgia, serif;
+      font-size: 20px;
+      font-weight: 900;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+
+    /* ─── NOTES ─────────────────────────────────────────── */
+    .notes {
+      font-family: 'Fraunces', Georgia, serif;
+      font-size: 12px;
+      font-style: italic;
+      line-height: 1.6;
+      color: var(--ink);
+      padding: 14px 18px;
+      border-left: 2px solid var(--ink);
+      background: #fafaf7;
+      margin-bottom: 32px;
+    }
+    .notes em {
+      font-style: italic;
+    }
+
+    /* ─── PAYMENT INFO ─────────────────────────────────── */
+    .payment-info {
+      font-size: 11px;
+      margin-bottom: 40px;
+      padding: 20px 0 4px 0;
+      border-top: 1px solid var(--line);
+    }
+    .payment-info div {
+      display: flex;
+      padding: 3px 0;
+      gap: 12px;
+    }
+    .payment-info strong {
+      font-weight: 500;
+      color: var(--dim);
+      text-transform: uppercase;
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      min-width: 130px;
+      padding-top: 2px;
+    }
+
+    /* ─── FOOTER ───────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--dim);
+      border-top: 1px solid var(--ink);
+      padding-top: 14px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="invoice-container">
+
+    <!-- Header -->
+    <div class="invoice-header">
+      <div class="logo">
+        {{#logoUrl}}
+        <img src="{{logoUrl}}" alt="{{companyName}}" />
+        {{/logoUrl}}
+        {{^logoUrl}}
+        {{companyName}}<span class="dot">.</span>
+        {{/logoUrl}}
+      </div>
+
+      <div class="company-details">
+        <strong>{{companyName}}</strong><br />
+        {{#companyAddress}}{{companyAddress}}<br />{{/companyAddress}}
+        {{#companyPostalCity}}{{companyPostalCity}}<br />{{/companyPostalCity}}
+        {{#companyCountry}}{{companyCountry}}<br />{{/companyCountry}}
+        {{#companyTaxId}}{{labels.taxIdLabel}}: {{companyTaxId}}{{/companyTaxId}}
+      </div>
+    </div>
+
+    <!-- Bill to + Invoice meta -->
+    <div class="info-section">
+      <div class="bill-to">
+        <h3>{{labels.billToHeading}}</h3>
+        <strong>{{customerName}}</strong>
+        {{#customerAddress}}{{customerAddress}}<br />{{/customerAddress}}
+        {{#customerPostalCity}}{{customerPostalCity}}<br />{{/customerPostalCity}}
+        {{#customerCountryCode}}{{customerCountryCode}}{{/customerCountryCode}}
+      </div>
+
+      <div class="invoice-details">
+        <h3>{{labels.invoiceTitle}}</h3>
+        {{#invoiceNumber}}<div><strong>{{labels.invoiceNumberShortLabel}}</strong> <span>{{invoiceNumber}}</span></div>{{/invoiceNumber}}
+        <div><strong>{{labels.invoiceDateLabel}}</strong> <span>{{issueDate}}</span></div>
+        {{#dueDate}}<div><strong>{{labels.dueDateLabel}}</strong> <span>{{dueDate}}</span></div>{{/dueDate}}
+        {{#status}}<div><strong>{{labels.statusLabel}}</strong> <span>{{status}}</span></div>{{/status}}
+      </div>
+    </div>
+
+    <!-- Items -->
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 50%;">{{labels.itemHeaderDescription}}</th>
+          <th style="width: 10%;">{{labels.itemHeaderQuantityShort}}</th>
+          <th style="width: 18%; text-align:right;">{{labels.itemHeaderUnitPriceShort}}</th>
+          <th style="width: 22%; text-align:right;">{{labels.itemHeaderAmount}}</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{#items}}
+        <tr>
+          <td>{{description}}</td>
+          <td>{{quantity}}</td>
+          <td style="text-align:right;">{{unitPrice}}</td>
+          <td style="text-align:right;">{{lineTotal}}</td>
+        </tr>
+        {{/items}}
+      </tbody>
+      <tfoot>
+        <tr>
+          <td colspan="3" class="label">{{labels.subtotalLabel}}</td>
+          <td style="text-align:right;">{{subtotal}}</td>
+        </tr>
+        {{#hasTax}}
+        <tr>
+          <td colspan="3" class="label">{{labels.taxLabel}} ({{taxRate}}%)</td>
+          <td style="text-align:right;">{{taxAmount}}</td>
+        </tr>
+        {{/hasTax}}
+        <tr>
+          <td colspan="3" class="label"><strong>{{labels.totalLabel}}</strong></td>
+          <td style="text-align:right;"><strong>{{total}}</strong></td>
+        </tr>
+      </tfoot>
+    </table>
+
+    <!-- Notes -->
+    {{#notes}}
+    <div class="notes">
+      <em>{{notes}}</em>
+    </div>
+    {{/notes}}
+
+    <!-- Payment -->
+    <div class="payment-info">
+      <h4>{{labels.paymentInformationHeading}}</h4>
+
+      {{#paymentTerms}}<div><strong>{{labels.paymentTermsLabel}}</strong> <span>{{paymentTerms}}</span></div>{{/paymentTerms}}
+      {{#paymentMethods}}<div><strong>{{labels.paymentMethodsLabel}}</strong> <span>{{paymentMethods}}</span></div>{{/paymentMethods}}
+      {{#bankName}}<div><strong>{{labels.bankNameLabel}}</strong> <span>{{bankName}}</span></div>{{/bankName}}
+      {{#bankAccount}}<div><strong>{{labels.bankAccountLabel}}</strong> <span>{{bankAccount}}</span></div>{{/bankAccount}}
+      {{#bankSwift}}<div><strong>{{labels.bankSwiftLabel}}</strong> <span>{{bankSwift}}</span></div>{{/bankSwift}}
+      {{#bankRouting}}<div><strong>{{labels.bankRoutingLabel}}</strong> <span>{{bankRouting}}</span></div>{{/bankRouting}}
+    </div>
+
+    <!-- Footer -->
+    <div class="footer">
+      {{labels.footerThankYou}}
+    </div>
+
+  </div>
+</body>
+</html>
