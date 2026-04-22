@@ -4,8 +4,9 @@ FROM oven/bun:1 AS builder
 # Set working directory
 WORKDIR /app
 
-# Copy VERSION file from parent context
-COPY ../VERSION ./VERSION
+# Copy VERSION file from named `repo_root` build context (provided by
+# docker-compose `additional_contexts` and by CI via `build-contexts`)
+COPY --from=repo_root VERSION ./VERSION
 
 # Copy package files
 COPY package.json bun.lock ./

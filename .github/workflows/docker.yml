@@ -68,14 +68,11 @@ jobs:
             echo "EOF" >> $GITHUB_OUTPUT
           fi
 
-      - name: Copy VERSION into frontend build context
-        if: ${{ matrix.image == 'frontend' }}
-        run: cp VERSION frontend/VERSION
-
       - name: Build and push image
         uses: docker/build-push-action@v6.18.0
         with:
           context: ${{ matrix.image }}
+          build-contexts: ${{ matrix.image == 'frontend' && 'repo_root=.' || '' }}
           platforms: linux/amd64,linux/arm64
           push: ${{ !github.event.pull_request.head.repo.fork }}
           cache-from: |

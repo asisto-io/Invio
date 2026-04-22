@@ -2,7 +2,9 @@ name: invio
 
 services:
   backend:
-    image: ghcr.io/kittendevv/invio-backend:latest
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     env_file:
       - .env
     environment:
@@ -17,7 +19,11 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ghcr.io/kittendevv/invio-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      additional_contexts:
+        repo_root: .
     env_file:
       - .env
     environment:
