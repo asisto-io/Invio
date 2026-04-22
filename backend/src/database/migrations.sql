@@ -18,6 +18,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
   ('bankAccount', 'Account: 1234567890, Routing: 987654321'),
   ('paymentTerms', 'Due in 30 days'),
   ('defaultNotes', 'Thank you for your business!'),
+  ('postalCityFormat', 'auto'),
   -- Optional default invoice number pattern (tokens: {YYYY} {YY} {MM} {DD} {DATE} {RAND4})
   ('invoiceNumberPattern', ''),
   ('invoiceNumberingEnabled', 'true'),
@@ -49,7 +50,7 @@ CREATE TABLE invoices (
   issue_date DATE NOT NULL,
   due_date DATE,
   currency TEXT DEFAULT 'USD',
-  status TEXT CHECK(status IN ('draft', 'sent', 'paid', 'overdue')) DEFAULT 'draft',
+  status TEXT CHECK(status IN ('draft', 'sent', 'complete', 'paid', 'overdue', 'voided')) DEFAULT 'draft',
   
   -- Totals
   subtotal NUMERIC NOT NULL DEFAULT 0,
@@ -98,10 +99,14 @@ CREATE TABLE templates (
   name TEXT NOT NULL,
   html TEXT NOT NULL,
   is_default BOOLEAN DEFAULT FALSE,
+  template_type TEXT DEFAULT 'builtin',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- No built-in default template is seeded here; startup code installs maintained templates.
+
+-- Add template_type column if not exists (for existing databases)
+ALTER TABLE templates ADD COLUMN template_type TEXT DEFAULT 'builtin';
 
 -- Index for performance
 CREATE INDEX idx_invoices_number ON invoices(invoice_number);
@@ -173,3 +178,39 @@ CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 
 -- Link invoice items to products (optional reference)
 ALTER TABLE invoice_items ADD COLUMN product_id TEXT REFERENCES products(id);
+
+-- Add 'voided' to invoice status CHECK constraint.
+-- SQLite CHECK constraints are immutable, but adding 'voided' via a direct
+-- UPDATE is safe because the original CREATE TABLE in this file already
+-- includes 'voided'. For databases created before this migration we accept
+-- the value through a permissive write (SQLite does NOT enforce CHECK on
+-- existing rows; and the updated CREATE TABLE definition above already
+-- includes 'voided' for fresh installs).
+
+-- =============================================
+-- Multi-user system: users & permissions
+-- =============================================
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT UNIQUE NOT NULL,
+  email TEXT,
+  display_name TEXT,
+  password_hash TEXT NOT NULL,
+  is_admin INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_permissions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  resource TEXT NOT NULL,
+  action TEXT NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, resource, action)
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
+CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);

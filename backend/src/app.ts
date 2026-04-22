@@ -5,7 +5,7 @@ import { initDatabase, resetDatabaseFromDemo } from "./database/init.ts";
 import { adminRoutes } from "./routes/admin.ts";
 import { publicRoutes } from "./routes/public.ts";
 import { authRoutes } from "./routes/auth.ts";
-import { logChromiumAvailability } from "./utils/chromium.ts";
+import { logWeasyPrintAvailability } from "./utils/weasyprint.ts";
 import { ensureEnv, getAdminCredentials, getJwtSecret } from "./utils/env.ts";
 
 const SECURE_HEADERS_DISABLED = (Deno.env.get("SECURE_HEADERS_DISABLED") || "").toLowerCase() === "true";
@@ -37,9 +37,9 @@ try {
 }
 
 // Initialize the database
-initDatabase();
+await initDatabase();
 
-await logChromiumAvailability();
+await logWeasyPrintAvailability();
 
 // In demo mode, schedule a periodic reset of the database from DEMO_DB_PATH.
 // Writes are allowed between resets.
@@ -51,12 +51,12 @@ try {
       (Deno.env.get("DEMO_RESET_ON_START") || "true").toLowerCase() !== "false";
     if (initial) {
       // Perform a reset at startup to ensure a pristine state
-      resetDatabaseFromDemo();
+      await resetDatabaseFromDemo();
     }
     const ms = Math.max(1, Math.floor(hours * 60 * 60 * 1000));
-    setInterval(() => {
+    setInterval(async () => {
       try {
-        resetDatabaseFromDemo();
+        await resetDatabaseFromDemo();
       } catch (e) {
         console.error("Periodic demo reset failed:", e);
       }

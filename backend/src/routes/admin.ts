@@ -9,12 +9,14 @@ import {
   publishInvoice,
   unpublishInvoice,
   updateInvoice,
+  voidInvoice,
 } from "../controllers/invoices.ts";
 import {
   createTemplate,
   deleteTemplate,
   getTemplateById,
   getTemplates,
+  installLocalTemplateFromZip,
   installTemplateFromManifest,
   loadTemplateFromFile,
   renderTemplate,
@@ -54,13 +56,11 @@ import {
   createCategory,
   deleteCategory,
   getCategories,
-  getCategoryById,
   isCategoryUsed,
   updateCategory,
   createUnit,
   deleteUnit,
   getUnits,
-  getUnitById,
   isUnitUsed,
   updateUnit,
 } from "../controllers/productOptions.ts";
@@ -70,9 +70,17 @@ import { generateInvoiceXML, listXMLProfiles } from "../utils/xmlProfiles.ts";
 import { availableInvoiceLocales } from "../i18n/translations.ts";
 import { resetDatabaseFromDemo } from "../database/init.ts";
 import { getNextInvoiceNumber } from "../database/init.ts";
-import { getDatabase } from "../database/init.ts";
 import { isDemoMode } from "../utils/env.ts";
-import { requireAdminAuth } from "../middleware/auth.ts";
+import { saveDataUrlLogo, saveUploadedLogoFile } from "../utils/logoStorage.ts";
+import { requireAdminAuth, requirePermission, requireAdmin, getAuthUser } from "../middleware/auth.ts";
+import {
+  listUsers,
+  getUserById as getUserByIdCtrl,
+  createUser as createUserCtrl,
+  updateUser as updateUserCtrl,
+  deleteUser as deleteUserCtrl,
+} from "../controllers/users.ts";
+import { RESOURCES, RESOURCE_ACTIONS } from "../types/index.ts";
 
 const adminRoutes = new Hono();
 
@@ -124,24 +132,84 @@ function normalizeTaxSettingsPayload(data: Record<string, unknown>) {
 const SUPPORTED_LOCALES = new Set(availableInvoiceLocales());
 
 function normalizeLocaleSettingPayload(data: Record<string, unknown>) {
-  if (!data || !Object.prototype.hasOwnProperty.call(data, "locale")) {
-    return;
+  if (!data) return;
+
+  // Accept common aliases and normalize to canonical keys
+  if (
+    !Object.prototype.hasOwnProperty.call(data, "dateFormat") &&
+    Object.prototype.hasOwnProperty.call(data, "date_format")
+  ) {
+    (data as Record<string, unknown>).dateFormat =
+      (data as Record<string, unknown>).date_format;
+    delete (data as Record<string, unknown>).date_format;
   }
-  const raw = String((data as Record<string, unknown>).locale ?? "").trim();
-  if (!raw) {
-    delete (data as Record<string, unknown>).locale;
-    return;
+  if (
+    !Object.prototype.hasOwnProperty.call(data, "numberFormat") &&
+    Object.prototype.hasOwnProperty.call(data, "number_format")
+  ) {
+    (data as Record<string, unknown>).numberFormat =
+      (data as Record<string, unknown>).number_format;
+    delete (data as Record<string, unknown>).number_format;
   }
-  const lower = raw.toLowerCase();
-  if (SUPPORTED_LOCALES.has(lower)) {
-    (data as Record<string, unknown>).locale = lower;
-    return;
+
+  // Accept common aliases and normalize to canonical key
+  if (
+    !Object.prototype.hasOwnProperty.call(data, "postalCityFormat") &&
+    Object.prototype.hasOwnProperty.call(data, "postal_city_format")
+  ) {
+    (data as Record<string, unknown>).postalCityFormat =
+      (data as Record<string, unknown>).postal_city_format;
+    delete (data as Record<string, unknown>).postal_city_format;
   }
-  const base = lower.split("-")[0];
-  if (SUPPORTED_LOCALES.has(base)) {
-    (data as Record<string, unknown>).locale = base;
-  } else {
-    (data as Record<string, unknown>).locale = "en";
+  if (
+    !Object.prototype.hasOwnProperty.call(data, "postalCityFormat") &&
+    Object.prototype.hasOwnProperty.call(data, "postalcityformat")
+  ) {
+    (data as Record<string, unknown>).postalCityFormat =
+      (data as Record<string, unknown>).postalcityformat;
+    delete (data as Record<string, unknown>).postalcityformat;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, "locale")) {
+    const raw = String((data as Record<string, unknown>).locale ?? "").trim();
+    if (!raw) {
+      delete (data as Record<string, unknown>).locale;
+    } else {
+      const lower = raw.toLowerCase();
+      if (SUPPORTED_LOCALES.has(lower)) {
+        (data as Record<string, unknown>).locale = lower;
+      } else {
+        const base = lower.split("-")[0];
+        if (SUPPORTED_LOCALES.has(base)) {
+          (data as Record<string, unknown>).locale = base;
+        } else {
+          (data as Record<string, unknown>).locale = "en";
+        }
+      }
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, "postalCityFormat")) {
+    const rawFormat = String(data.postalCityFormat ?? "").trim().toLowerCase();
+    if (rawFormat === "city-postal" || rawFormat === "postal-city") {
+      (data as Record<string, unknown>).postalCityFormat = rawFormat;
+    } else {
+      (data as Record<string, unknown>).postalCityFormat = "auto";
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, "numberFormat")) {
+    const rawNumberFormat = String(data.numberFormat ?? "").trim().toLowerCase();
+    (data as Record<string, unknown>).numberFormat = rawNumberFormat === "period"
+      ? "period"
+      : "comma";
+  }
+
+  if (Object.prototype.hasOwnProperty.call(data, "dateFormat")) {
+    const rawDateFormat = String(data.dateFormat ?? "").trim();
+    (data as Record<string, unknown>).dateFormat = rawDateFormat === "DD.MM.YYYY"
+      ? "DD.MM.YYYY"
+      : "YYYY-MM-DD";
   }
 }
 
@@ -174,6 +242,21 @@ adminRoutes.use(
 );
 
 adminRoutes.use(
+  "/product-categories/*",
+  requireAdminAuth,
+);
+
+adminRoutes.use(
+  "/product-units/*",
+  requireAdminAuth,
+);
+
+adminRoutes.use(
+  "/settings",
+  requireAdminAuth,
+);
+
+adminRoutes.use(
   "/settings/*",
   requireAdminAuth,
 );
@@ -191,10 +274,10 @@ adminRoutes.use(
 );
 
 // Demo helper: trigger an immediate reset (only effective when DEMO_MODE=true)
-adminRoutes.post("/admin/demo/reset", (c) => {
+adminRoutes.post("/admin/demo/reset", async (c) => {
   if (!DEMO_MODE) return c.json({ error: "Demo mode is not enabled" }, 400);
   try {
-    resetDatabaseFromDemo();
+    await resetDatabaseFromDemo();
     return c.json({ ok: true });
   } catch (e) {
     return c.json({ error: String(e) }, 500);
@@ -202,7 +285,7 @@ adminRoutes.post("/admin/demo/reset", (c) => {
 });
 
 // Invoice routes
-adminRoutes.get("/invoices/next-number", (c) => {
+adminRoutes.get("/invoices/next-number", requirePermission("invoices", "create"), (c) => {
   try {
     const next = getNextInvoiceNumber();
     return c.json({ next });
@@ -210,7 +293,7 @@ adminRoutes.get("/invoices/next-number", (c) => {
     return c.json({ error: String(e) }, 500);
   }
 });
-adminRoutes.post("/invoices", async (c) => {
+adminRoutes.post("/invoices", requirePermission("invoices", "create"), async (c) => {
   const data = await c.req.json();
   try {
     const invoice = createInvoice(data);
@@ -224,7 +307,7 @@ adminRoutes.post("/invoices", async (c) => {
   }
 });
 
-adminRoutes.get("/invoices", (c) => {
+adminRoutes.get("/invoices", requirePermission("invoices", "read"), (c) => {
   const invoices = getInvoices();
   // Enrich with customer name and snake_case issue_date for UI compatibility
   const list = invoices.map((inv) => {
@@ -245,16 +328,23 @@ adminRoutes.get("/invoices", (c) => {
   return c.json(list);
 });
 
-adminRoutes.get("/invoices/:id", (c) => {
+adminRoutes.get("/invoices/:id", requirePermission("invoices", "read"), (c) => {
   const id = c.req.param("id");
   const invoice = getInvoiceById(id);
   if (!invoice) {
     return c.json({ error: "Invoice not found" }, 404);
   }
-  return c.json(invoice);
+  // Add snake_case date strings for UI compatibility (same as list endpoint)
+  const issue_date = invoice.issueDate
+    ? new Date(invoice.issueDate).toISOString().slice(0, 10)
+    : undefined;
+  const due_date = invoice.dueDate
+    ? new Date(invoice.dueDate).toISOString().slice(0, 10)
+    : undefined;
+  return c.json({ ...invoice, issue_date, due_date });
 });
 
-adminRoutes.put("/invoices/:id", async (c) => {
+adminRoutes.put("/invoices/:id", requirePermission("invoices", "update"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
   try {
@@ -269,13 +359,17 @@ adminRoutes.put("/invoices/:id", async (c) => {
   }
 });
 
-adminRoutes.delete("/invoices/:id", (c) => {
+adminRoutes.delete("/invoices/:id", requirePermission("invoices", "delete"), async (c) => {
   const id = c.req.param("id");
-  deleteInvoice(id);
-  return c.json({ success: true });
+  try {
+    await deleteInvoice(id);
+    return c.json({ success: true });
+  } catch (e) {
+    return c.json({ error: String(e) }, 400);
+  }
 });
 
-adminRoutes.post("/invoices/:id/publish", async (c) => {
+adminRoutes.post("/invoices/:id/publish", requirePermission("invoices", "publish"), async (c) => {
   const id = c.req.param("id");
   try {
     const result = await publishInvoice(id);
@@ -285,21 +379,31 @@ adminRoutes.post("/invoices/:id/publish", async (c) => {
   }
 });
 
-adminRoutes.post("/invoices/:id/unpublish", async (c) => {
+adminRoutes.post("/invoices/:id/unpublish", requirePermission("invoices", "publish"), async (c) => {
   const id = c.req.param("id");
   const result = await unpublishInvoice(id);
   return c.json(result);
 });
 
-adminRoutes.post("/invoices/:id/duplicate", async (c) => {
+adminRoutes.post("/invoices/:id/duplicate", requirePermission("invoices", "create"), async (c) => {
   const id = c.req.param("id");
   const copy = await duplicateInvoice(id);
   if (!copy) return c.json({ error: "Invoice not found" }, 404);
   return c.json(copy);
 });
 
+adminRoutes.post("/invoices/:id/void", requirePermission("invoices", "void"), async (c) => {
+  const id = c.req.param("id");
+  try {
+    const result = await voidInvoice(id);
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 400);
+  }
+});
+
 // Template routes
-adminRoutes.get("/templates", async (c) => {
+adminRoutes.get("/templates", requirePermission("templates", "read"), async (c) => {
   let templates = await getTemplates();
   // Overlay the default from settings if present; also compute 'updatable' flag when a manifest source exists
   try {
@@ -326,7 +430,7 @@ adminRoutes.get("/templates", async (c) => {
 });
 
 // Tax definition routes
-adminRoutes.get("/tax-definitions", (c) => {
+adminRoutes.get("/tax-definitions", requirePermission("tax_definitions", "read"), (c) => {
   try {
     const list = getTaxDefinitions();
     return c.json(list);
@@ -335,7 +439,7 @@ adminRoutes.get("/tax-definitions", (c) => {
   }
 });
 
-adminRoutes.get("/tax-definitions/:id", (c) => {
+adminRoutes.get("/tax-definitions/:id", requirePermission("tax_definitions", "read"), (c) => {
   try {
     const id = c.req.param("id");
     const tax = getTaxDefinitionById(id);
@@ -346,7 +450,7 @@ adminRoutes.get("/tax-definitions/:id", (c) => {
   }
 });
 
-adminRoutes.post("/tax-definitions", async (c) => {
+adminRoutes.post("/tax-definitions", requirePermission("tax_definitions", "create"), async (c) => {
   const data = await c.req.json();
   try {
     const created = createTaxDefinition(data);
@@ -360,7 +464,7 @@ adminRoutes.post("/tax-definitions", async (c) => {
   }
 });
 
-adminRoutes.put("/tax-definitions/:id", async (c) => {
+adminRoutes.put("/tax-definitions/:id", requirePermission("tax_definitions", "update"), async (c) => {
   const data = await c.req.json();
   try {
     const id = c.req.param("id");
@@ -376,7 +480,7 @@ adminRoutes.put("/tax-definitions/:id", async (c) => {
   }
 });
 
-adminRoutes.delete("/tax-definitions/:id", (c) => {
+adminRoutes.delete("/tax-definitions/:id", requirePermission("tax_definitions", "delete"), (c) => {
   try {
     const id = c.req.param("id");
     const result = deleteTaxDefinition(id);
@@ -388,14 +492,14 @@ adminRoutes.delete("/tax-definitions/:id", (c) => {
   }
 });
 
-adminRoutes.post("/templates", async (c) => {
+adminRoutes.post("/templates", requirePermission("templates", "create"), async (c) => {
   const data = await c.req.json();
   const template = await createTemplate(data);
   return c.json(template);
 });
 
 // Install a template from a remote manifest URL (YAML or JSON)
-adminRoutes.post("/templates/install-from-manifest", async (c) => {
+adminRoutes.post("/templates/install-from-manifest", requirePermission("templates", "install"), async (c) => {
   try {
     const { url } = await c.req.json();
     if (!url || typeof url !== "string") {
@@ -412,8 +516,48 @@ adminRoutes.post("/templates/install-from-manifest", async (c) => {
   }
 });
 
+// Install a local template from an uploaded .zip file
+adminRoutes.post("/templates/upload", requirePermission("templates", "install"), async (c) => {
+  try {
+    const contentType = c.req.header("content-type") || "";
+
+    let zipData: Uint8Array;
+
+    if (contentType.includes("multipart/form-data")) {
+      // Handle multipart form upload
+      const formData = await c.req.formData();
+      const file = formData.get("file");
+      if (!file || !(file instanceof File)) {
+        return c.json({ error: "No file uploaded" }, 400);
+      }
+      if (!file.name.endsWith(".zip")) {
+        return c.json({ error: "File must be a .zip archive" }, 400);
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        return c.json({ error: "File too large (max 5MB)" }, 400);
+      }
+      const arrayBuffer = await file.arrayBuffer();
+      zipData = new Uint8Array(arrayBuffer);
+    } else if (contentType.includes("application/zip") || contentType.includes("application/octet-stream")) {
+      // Handle raw binary upload
+      const arrayBuffer = await c.req.arrayBuffer();
+      if (arrayBuffer.byteLength > 5 * 1024 * 1024) {
+        return c.json({ error: "File too large (max 5MB)" }, 400);
+      }
+      zipData = new Uint8Array(arrayBuffer);
+    } else {
+      return c.json({ error: "Invalid content type. Expected multipart/form-data or application/zip" }, 400);
+    }
+
+    const t = await installLocalTemplateFromZip(zipData);
+    return c.json(t);
+  } catch (e) {
+    return c.json({ error: String(e) }, 400);
+  }
+});
+
 // Update a template by id using its stored source manifest URL
-adminRoutes.post("/templates/:id/update", async (c) => {
+adminRoutes.post("/templates/:id/update", requirePermission("templates", "update"), async (c) => {
   const id = c.req.param("id");
   try {
     const src = await getSetting(`templateSource:${id}`);
@@ -431,7 +575,7 @@ adminRoutes.post("/templates/:id/update", async (c) => {
 });
 
 // Delete a template (disallow removing built-in app templates)
-adminRoutes.delete("/templates/:id", async (c) => {
+adminRoutes.delete("/templates/:id", requirePermission("templates", "delete"), async (c) => {
   const id = c.req.param("id");
   // Built-in templates are protected
   const builtin = new Set(["professional-modern", "minimalist-clean"]);
@@ -458,7 +602,7 @@ adminRoutes.delete("/templates/:id", async (c) => {
 });
 
 // Get template by ID
-adminRoutes.get("/templates/:id", (c) => {
+adminRoutes.get("/templates/:id", requirePermission("templates", "read"), (c) => {
   const id = c.req.param("id");
   const template = getTemplateById(id);
   if (!template) {
@@ -468,7 +612,7 @@ adminRoutes.get("/templates/:id", (c) => {
 });
 
 // Preview template with sample data
-adminRoutes.post("/templates/:id/preview", async (c) => {
+adminRoutes.post("/templates/:id/preview", requirePermission("templates", "read"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
 
@@ -535,7 +679,7 @@ adminRoutes.post("/templates/:id/preview", async (c) => {
 });
 
 // Load template from file
-adminRoutes.post("/templates/load-from-file", async (c) => {
+adminRoutes.post("/templates/load-from-file", requirePermission("templates", "create"), async (c) => {
   try {
     const { filePath, name, isDefault, highlightColor } = await c.req.json();
 
@@ -577,17 +721,33 @@ adminRoutes.get("/settings", async (c) => {
   if (map.logoUrl && !map.logo) map.logo = map.logoUrl;
   if (map.logoUrl) delete map.logoUrl;
   if (!map.locale) map.locale = "en";
+  if (!map.dateFormat && map.date_format) map.dateFormat = map.date_format;
+  if (!map.numberFormat && map.number_format) {
+    map.numberFormat = map.number_format;
+  }
+  if (!map.postalCityFormat && map.postal_city_format) {
+    map.postalCityFormat = map.postal_city_format;
+  }
+  if (!map.postalCityFormat && map.postalcityformat) {
+    map.postalCityFormat = map.postalcityformat;
+  }
+  if (!map.dateFormat) map.dateFormat = "YYYY-MM-DD";
+  if (!map.numberFormat) map.numberFormat = "comma";
+  if (!map.postalCityFormat) map.postalCityFormat = "auto";
   // Expose demo mode to frontend UI
   (map as Record<string, unknown>).demoMode = DEMO_MODE ? "true" : "false";
   return c.json(map);
 });
 
-adminRoutes.put("/settings", async (c) => {
+adminRoutes.put("/settings", requirePermission("settings", "update"), async (c) => {
   const data = await c.req.json();
   // Normalize legacy logoUrl to logo
   if (typeof data.logoUrl === "string" && !data.logo) {
     data.logo = data.logoUrl;
     delete data.logoUrl;
+  }
+  if (typeof data.logo === "string" && data.logo.startsWith("data:image/")) {
+    data.logo = await saveDataUrlLogo(data.logo);
   }
   // Normalize tax-related settings
   normalizeTaxSettingsPayload(data);
@@ -606,12 +766,15 @@ adminRoutes.put("/settings", async (c) => {
 });
 
 // Partial update (PATCH) to merge provided keys only
-adminRoutes.patch("/settings", async (c) => {
+adminRoutes.patch("/settings", requirePermission("settings", "update"), async (c) => {
   const data = await c.req.json();
   // Normalize legacy logoUrl to logo
   if (typeof data.logoUrl === "string" && !data.logo) {
     data.logo = data.logoUrl;
     delete data.logoUrl;
+  }
+  if (typeof data.logo === "string" && data.logo.startsWith("data:image/")) {
+    data.logo = await saveDataUrlLogo(data.logo);
   }
   // Normalize countryCode alias to companyCountryCode
   if (typeof data.countryCode === "string" && !data.companyCountryCode) {
@@ -633,6 +796,20 @@ adminRoutes.patch("/settings", async (c) => {
   return c.json(settings);
 });
 
+adminRoutes.post("/settings/logo-upload", requirePermission("settings", "update"), async (c) => {
+  try {
+    const form = await c.req.formData();
+    const entry = form.get("file");
+    if (!(entry instanceof File)) {
+      return c.json({ error: "Missing file" }, 400);
+    }
+    const logo = await saveUploadedLogoFile(entry);
+    return c.json({ logo });
+  } catch (e) {
+    return c.json({ error: String(e) }, 400);
+  }
+});
+
 // Optional admin-prefixed aliases for clarity/documentation parity
 adminRoutes.get("/admin/settings", async (c) => {
   const settings = await getSettings();
@@ -649,12 +826,25 @@ adminRoutes.get("/admin/settings", async (c) => {
   if (map.logoUrl && !map.logo) map.logo = map.logoUrl;
   if (map.logoUrl) delete map.logoUrl;
   if (!map.locale) map.locale = "en";
+  if (!map.dateFormat && map.date_format) map.dateFormat = map.date_format;
+  if (!map.numberFormat && map.number_format) {
+    map.numberFormat = map.number_format;
+  }
+  if (!map.postalCityFormat && map.postal_city_format) {
+    map.postalCityFormat = map.postal_city_format;
+  }
+  if (!map.postalCityFormat && map.postalcityformat) {
+    map.postalCityFormat = map.postalcityformat;
+  }
+  if (!map.dateFormat) map.dateFormat = "YYYY-MM-DD";
+  if (!map.numberFormat) map.numberFormat = "comma";
+  if (!map.postalCityFormat) map.postalCityFormat = "auto";
   // Expose demo mode to frontend UI for admin-prefixed route as well
   (map as Record<string, unknown>).demoMode = DEMO_MODE ? "true" : "false";
   return c.json(map);
 });
 
-adminRoutes.put("/admin/settings", async (c) => {
+adminRoutes.put("/admin/settings", requirePermission("settings", "update"), async (c) => {
   const data = await c.req.json();
   if (typeof data.logoUrl === "string" && !data.logo) {
     data.logo = data.logoUrl;
@@ -670,7 +860,7 @@ adminRoutes.put("/admin/settings", async (c) => {
   return c.json(settings);
 });
 
-adminRoutes.patch("/admin/settings", async (c) => {
+adminRoutes.patch("/admin/settings", requirePermission("settings", "update"), async (c) => {
   const data = await c.req.json();
   if (typeof data.logoUrl === "string" && !data.logo) {
     data.logo = data.logoUrl;
@@ -687,12 +877,12 @@ adminRoutes.patch("/admin/settings", async (c) => {
 });
 
 // Customer routes
-adminRoutes.get("/customers", async (c) => {
+adminRoutes.get("/customers", requirePermission("customers", "read"), async (c) => {
   const customers = await getCustomers();
   return c.json(customers);
 });
 
-adminRoutes.get("/customers/:id", async (c) => {
+adminRoutes.get("/customers/:id", requirePermission("customers", "read"), async (c) => {
   const id = c.req.param("id");
   const customer = await getCustomerById(id);
   if (!customer) {
@@ -701,27 +891,27 @@ adminRoutes.get("/customers/:id", async (c) => {
   return c.json(customer);
 });
 
-adminRoutes.post("/customers", async (c) => {
+adminRoutes.post("/customers", requirePermission("customers", "create"), async (c) => {
   const data = await c.req.json();
-  const customer = await createCustomer(data);
+  const customer = createCustomer(data);
   return c.json(customer);
 });
 
-adminRoutes.put("/customers/:id", async (c) => {
+adminRoutes.put("/customers/:id", requirePermission("customers", "update"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
   const customer = await updateCustomer(id, data);
   return c.json(customer);
 });
 
-adminRoutes.delete("/customers/:id", async (c) => {
+adminRoutes.delete("/customers/:id", requirePermission("customers", "delete"), async (c) => {
   const id = c.req.param("id");
   await deleteCustomer(id);
   return c.json({ success: true });
 });
 
 // Product routes
-adminRoutes.get("/products", (c) => {
+adminRoutes.get("/products", requirePermission("products", "read"), (c) => {
   const url = new URL(c.req.url);
   const includeInactive =
     url.searchParams.get("includeInactive")?.toLowerCase() === "true";
@@ -729,7 +919,7 @@ adminRoutes.get("/products", (c) => {
   return c.json(products);
 });
 
-adminRoutes.get("/products/:id", (c) => {
+adminRoutes.get("/products/:id", requirePermission("products", "read"), (c) => {
   const id = c.req.param("id");
   const product = getProductById(id);
   if (!product) {
@@ -738,7 +928,7 @@ adminRoutes.get("/products/:id", (c) => {
   return c.json(product);
 });
 
-adminRoutes.post("/products", async (c) => {
+adminRoutes.post("/products", requirePermission("products", "create"), async (c) => {
   const data = await c.req.json();
   try {
     const product = createProduct(data);
@@ -748,7 +938,7 @@ adminRoutes.post("/products", async (c) => {
   }
 });
 
-adminRoutes.put("/products/:id", async (c) => {
+adminRoutes.put("/products/:id", requirePermission("products", "update"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
   try {
@@ -762,7 +952,7 @@ adminRoutes.put("/products/:id", async (c) => {
   }
 });
 
-adminRoutes.delete("/products/:id", (c) => {
+adminRoutes.delete("/products/:id", requirePermission("products", "delete"), (c) => {
   const id = c.req.param("id");
   try {
     deleteProduct(id);
@@ -777,7 +967,7 @@ adminRoutes.delete("/products/:id", (c) => {
 });
 
 // Check if product is used in invoices
-adminRoutes.get("/products/:id/usage", (c) => {
+adminRoutes.get("/products/:id/usage", requirePermission("products", "read"), (c) => {
   const id = c.req.param("id");
   const product = getProductById(id);
   if (!product) {
@@ -788,7 +978,7 @@ adminRoutes.get("/products/:id/usage", (c) => {
 });
 
 // Reactivate a soft-deleted product
-adminRoutes.post("/products/:id/reactivate", (c) => {
+adminRoutes.post("/products/:id/reactivate", requirePermission("products", "update"), (c) => {
   const id = c.req.param("id");
   try {
     const product = reactivateProduct(id);
@@ -802,21 +992,19 @@ adminRoutes.post("/products/:id/reactivate", (c) => {
 });
 
 // Product Categories
-adminRoutes.get("/product-categories", (c) => {
+adminRoutes.get("/product-categories", requirePermission("products", "read"), (c) => {
   const categories = getCategories();
   return c.json(categories);
 });
 
-adminRoutes.get("/product-categories/:id", (c) => {
-  const id = c.req.param("id");
-  const category = getCategoryById(id);
+adminRoutes.get("/product-categories/:id", requirePermission("products", "read"), (c) => {
   if (!category) {
     return c.json({ error: "Category not found" }, 404);
   }
   return c.json(category);
 });
 
-adminRoutes.post("/product-categories", async (c) => {
+adminRoutes.post("/product-categories", requirePermission("products", "create"), async (c) => {
   const data = await c.req.json();
   try {
     const category = createCategory(data);
@@ -826,7 +1014,7 @@ adminRoutes.post("/product-categories", async (c) => {
   }
 });
 
-adminRoutes.put("/product-categories/:id", async (c) => {
+adminRoutes.put("/product-categories/:id", requirePermission("products", "update"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
   try {
@@ -840,7 +1028,7 @@ adminRoutes.put("/product-categories/:id", async (c) => {
   }
 });
 
-adminRoutes.delete("/product-categories/:id", (c) => {
+adminRoutes.delete("/product-categories/:id", requirePermission("products", "delete"), (c) => {
   const id = c.req.param("id");
   try {
     const deleted = deleteCategory(id);
@@ -853,28 +1041,26 @@ adminRoutes.delete("/product-categories/:id", (c) => {
   }
 });
 
-adminRoutes.get("/product-categories/:id/usage", (c) => {
+adminRoutes.get("/product-categories/:id/usage", requirePermission("products", "read"), (c) => {
   const id = c.req.param("id");
   const usage = isCategoryUsed(id);
   return c.json(usage);
 });
 
 // Product Units
-adminRoutes.get("/product-units", (c) => {
+adminRoutes.get("/product-units", requirePermission("products", "read"), (c) => {
   const units = getUnits();
   return c.json(units);
 });
 
-adminRoutes.get("/product-units/:id", (c) => {
-  const id = c.req.param("id");
-  const unit = getUnitById(id);
+adminRoutes.get("/product-units/:id", requirePermission("products", "read"), (c) => {
   if (!unit) {
     return c.json({ error: "Unit not found" }, 404);
   }
   return c.json(unit);
 });
 
-adminRoutes.post("/product-units", async (c) => {
+adminRoutes.post("/product-units", requirePermission("products", "create"), async (c) => {
   const data = await c.req.json();
   try {
     const unit = createUnit(data);
@@ -884,7 +1070,7 @@ adminRoutes.post("/product-units", async (c) => {
   }
 });
 
-adminRoutes.put("/product-units/:id", async (c) => {
+adminRoutes.put("/product-units/:id", requirePermission("products", "update"), async (c) => {
   const id = c.req.param("id");
   const data = await c.req.json();
   try {
@@ -898,7 +1084,7 @@ adminRoutes.put("/product-units/:id", async (c) => {
   }
 });
 
-adminRoutes.delete("/product-units/:id", (c) => {
+adminRoutes.delete("/product-units/:id", requirePermission("products", "delete"), (c) => {
   const id = c.req.param("id");
   try {
     const deleted = deleteUnit(id);
@@ -911,14 +1097,14 @@ adminRoutes.delete("/product-units/:id", (c) => {
   }
 });
 
-adminRoutes.get("/product-units/:id/usage", (c) => {
+adminRoutes.get("/product-units/:id/usage", requirePermission("products", "read"), (c) => {
   const id = c.req.param("id");
   const usage = isUnitUsed(id);
   return c.json(usage);
 });
 
 // Authenticated HTML/PDF generation for invoices by ID (no share token required)
-adminRoutes.get("/invoices/:id/html", async (c) => {
+adminRoutes.get("/invoices/:id/html", requirePermission("invoices", "read"), async (c) => {
   const id = c.req.param("id");
   const invoice = getInvoiceById(id);
   if (!invoice) {
@@ -931,6 +1117,8 @@ adminRoutes.get("/invoices/:id/html", async (c) => {
     acc[s.key] = s.value as string;
     return acc;
   }, {} as Record<string, string>);
+  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) settingsMap.postalCityFormat = settingsMap.postal_city_format;
+  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) settingsMap.postalCityFormat = settingsMap.postalcityformat;
   if (!settingsMap.logo && settingsMap.logoUrl) {
     settingsMap.logo = settingsMap.logoUrl;
   }
@@ -940,6 +1128,8 @@ adminRoutes.get("/invoices/:id/html", async (c) => {
     companyAddress: settingsMap.companyAddress || "",
     companyCity: settingsMap.companyCity || "",
     companyPostalCode: settingsMap.companyPostalCode || "",
+    companyCountryCode: settingsMap.companyCountryCode || "",
+    postalCityFormat: settingsMap.postalCityFormat || "auto",
     companyEmail: settingsMap.companyEmail || "",
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
@@ -984,7 +1174,7 @@ adminRoutes.get("/invoices/:id/html", async (c) => {
   });
 });
 
-adminRoutes.get("/invoices/:id/pdf", async (c) => {
+adminRoutes.get("/invoices/:id/pdf", requirePermission("invoices", "export"), async (c) => {
   const id = c.req.param("id");
   const invoice = getInvoiceById(id);
   if (!invoice) {
@@ -997,6 +1187,8 @@ adminRoutes.get("/invoices/:id/pdf", async (c) => {
     acc[s.key] = s.value as string;
     return acc;
   }, {} as Record<string, string>);
+  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) settingsMap.postalCityFormat = settingsMap.postal_city_format;
+  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) settingsMap.postalCityFormat = settingsMap.postalcityformat;
   if (!settingsMap.logo && settingsMap.logoUrl) {
     settingsMap.logo = settingsMap.logoUrl;
   }
@@ -1006,6 +1198,8 @@ adminRoutes.get("/invoices/:id/pdf", async (c) => {
     companyAddress: settingsMap.companyAddress || "",
     companyCity: settingsMap.companyCity || "",
     companyPostalCode: settingsMap.companyPostalCode || "",
+    companyCountryCode: settingsMap.companyCountryCode || "",
+    postalCityFormat: settingsMap.postalCityFormat || "auto",
     companyEmail: settingsMap.companyEmail || "",
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
@@ -1087,7 +1281,7 @@ adminRoutes.get("/invoices/:id/pdf", async (c) => {
 });
 
 // UBL (PEPPOL BIS Billing 3.0) XML for an invoice by ID
-adminRoutes.get("/invoices/:id/ubl.xml", async (c) => {
+adminRoutes.get("/invoices/:id/ubl.xml", requirePermission("invoices", "export"), async (c) => {
   const id = c.req.param("id");
   const invoice = getInvoiceById(id);
   if (!invoice) {
@@ -1138,7 +1332,7 @@ adminRoutes.get("/invoices/:id/ubl.xml", async (c) => {
 });
 
 // Generic XML export selecting an internal profile (?profile=ubl21 or stub-generic)
-adminRoutes.get("/invoices/:id/xml", async (c) => {
+adminRoutes.get("/invoices/:id/xml", requirePermission("invoices", "export"), async (c) => {
   const id = c.req.param("id");
   const invoice = getInvoiceById(id);
   if (!invoice) return c.json({ message: "Invoice not found" }, 404);
@@ -1194,7 +1388,7 @@ adminRoutes.get("/invoices/:id/xml", async (c) => {
 });
 
 // List built-in XML profiles
-adminRoutes.get("/xml-profiles", (c) => {
+adminRoutes.get("/xml-profiles", requirePermission("invoices", "read"), (c) => {
   const profiles = listXMLProfiles().map((p) => ({
     id: p.id,
     name: p.name,
@@ -1206,235 +1400,108 @@ adminRoutes.get("/xml-profiles", (c) => {
   return c.json(profiles);
 });
 
-export { adminRoutes };
+// =============================================
+// User management routes
+// =============================================
+adminRoutes.use("/users/*", requireAdminAuth);
 
-// Export all data (DB file, JSON dump, installed template assets) as a tar.gz
-adminRoutes.get("/export/full", async (c) => {
-  // Parse options: includeDb (default true), includeJson (default true), includeAssets (default true)
-  const url = new URL(c.req.url);
-  const includeDb =
-    (url.searchParams.get("includeDb") ?? "true").toLowerCase() !== "false";
-  const includeJson =
-    (url.searchParams.get("includeJson") ?? "true").toLowerCase() !== "false";
-  const includeAssets =
-    (url.searchParams.get("includeAssets") ?? "true").toLowerCase() !== "false";
+// GET /users/me — current authenticated user (any authenticated user)
+adminRoutes.get("/users/me", (c) => {
+  const user = getAuthUser(c);
+  if (!user) return c.json({ error: "Not authenticated" }, 401);
+  // Return user info with permissions and available RESOURCE_ACTIONS map
+  return c.json({
+    ...user,
+    availableResources: RESOURCE_ACTIONS,
+  });
+});
 
-  // Resolve active DB path
-  const dbPath = Deno.env.get("DATABASE_PATH") || "./invio.db";
+// GET /users/permissions-schema — returns the valid resources and actions
+adminRoutes.get("/users/permissions-schema", (c) => {
+  const user = getAuthUser(c);
+  const canViewSchema =
+    !!user &&
+    (user.isAdmin ||
+      user.permissions.some(
+        (p) =>
+          p.resource === "users" &&
+          (p.action === "read" || p.action === "create" || p.action === "update"),
+      ));
+  if (!canViewSchema) {
+    return c.json({ error: "Missing permission: users:read|create|update" }, 403);
+  }
 
-  // Create a staging temp dir
-  let tmpDir = "";
-  let outPath = "";
+  return c.json({
+    resources: RESOURCES,
+    resourceActions: RESOURCE_ACTIONS,
+  });
+});
+
+// GET /users — list all users
+adminRoutes.get("/users", requirePermission("users", "read"), (c) => {
+  const users = listUsers();
+  return c.json(users);
+});
+
+// POST /users — create a new user
+adminRoutes.post("/users", requirePermission("users", "create"), async (c) => {
   try {
-    tmpDir = await Deno.makeTempDir({ prefix: "invio-export-" });
-    // Optionally copy DB file
-    if (includeDb) {
-      try {
-        await Deno.copyFile(dbPath, `${tmpDir}/invio.db`);
-      } catch (e) {
-        console.warn("Export: could not copy DB file:", e);
-      }
-    }
-
-    // Optionally dump JSON
-    if (includeJson) {
-      try {
-        const db = getDatabase();
-        const q = (sql: string, params: unknown[] = []) =>
-          db.query(sql, params) as unknown[][];
-        // settings as map
-        const settingsRows = q("SELECT key, value FROM settings");
-        const settings: Record<string, string> = {};
-        for (const r of settingsRows) {
-          settings[String(r[0])] = String(r[1] ?? "");
-        }
-
-        const customers = q(
-          "SELECT id, name, email, phone, address, country_code, tax_id, created_at FROM customers ORDER BY created_at DESC",
-        ).map((r) => ({
-          id: String(r[0]),
-          name: String(r[1]),
-          email: r[2] ?? null,
-          phone: r[3] ?? null,
-          address: r[4] ?? null,
-          countryCode: r[5] ?? null,
-          taxId: r[6] ?? null,
-          createdAt: r[7],
-        }));
-        const invoices = q(
-          "SELECT id, invoice_number, customer_id, issue_date, due_date, currency, status, subtotal, discount_amount, discount_percentage, tax_rate, tax_amount, total, payment_terms, notes, share_token, created_at, updated_at, prices_include_tax, rounding_mode FROM invoices ORDER BY created_at DESC",
-        ).map((r) => ({
-          id: r[0],
-          invoiceNumber: r[1],
-          customerId: r[2],
-          issueDate: r[3],
-          dueDate: r[4],
-          currency: r[5],
-          status: r[6],
-          subtotal: r[7],
-          discountAmount: r[8],
-          discountPercentage: r[9],
-          taxRate: r[10],
-          taxAmount: r[11],
-          total: r[12],
-          paymentTerms: r[13],
-          notes: r[14],
-          shareToken: r[15],
-          createdAt: r[16],
-          updatedAt: r[17],
-          pricesIncludeTax: r[18],
-          roundingMode: r[19],
-        }));
-        const items = q(
-          "SELECT id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order FROM invoice_items ORDER BY invoice_id, sort_order",
-        ).map((r) => ({
-          id: r[0],
-          invoiceId: r[1],
-          description: r[2],
-          quantity: r[3],
-          unitPrice: r[4],
-          lineTotal: r[5],
-          notes: r[6],
-          sortOrder: r[7],
-        }));
-        const itemTaxes = q(
-          "SELECT id, invoice_item_id, tax_definition_id, percent, taxable_amount, amount, included, sequence, note, created_at FROM invoice_item_taxes ORDER BY created_at",
-        ).map((r) => ({
-          id: r[0],
-          invoiceItemId: r[1],
-          taxDefinitionId: r[2],
-          percent: r[3],
-          taxableAmount: r[4],
-          amount: r[5],
-          included: r[6],
-          sequence: r[7],
-          note: r[8],
-          createdAt: r[9],
-        }));
-        const invoiceTaxes = q(
-          "SELECT id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at FROM invoice_taxes ORDER BY created_at",
-        ).map((r) => ({
-          id: r[0],
-          invoiceId: r[1],
-          taxDefinitionId: r[2],
-          percent: r[3],
-          taxableAmount: r[4],
-          taxAmount: r[5],
-          createdAt: r[6],
-        }));
-        const templates = q(
-          "SELECT id, name, html, is_default, created_at FROM templates ORDER BY created_at DESC",
-        ).map((r) => ({
-          id: r[0],
-          name: r[1],
-          html: r[2],
-          isDefault: r[3],
-          createdAt: r[4],
-        }));
-
-        const json = {
-          exportedAt: new Date().toISOString(),
-          settings,
-          customers,
-          invoices,
-          invoiceItems: items,
-          invoiceItemTaxes: itemTaxes,
-          invoiceTaxes,
-          templates,
-        };
-        await Deno.writeTextFile(
-          `${tmpDir}/data.json`,
-          JSON.stringify(json, null, 2),
-        );
-      } catch (e) {
-        console.warn("Export: JSON dump failed:", e);
-      }
-    }
-
-    // Optionally copy installed template assets directory
-    if (includeAssets) {
-      const src = "./data/templates";
-      const dest = `${tmpDir}/templates`;
-      try {
-        // Only copy if exists
-        const s = await Deno.stat(src).catch(() => null);
-        if (s && s.isDirectory) {
-          await copyDirRecursive(src, dest);
-        }
-      } catch (e) {
-        console.warn("Export: copying template assets failed:", e);
-      }
-    }
-
-    // Create tar.gz from tmpDir contents. Important: write the archive OUTSIDE tmpDir
-    // to avoid tar including its own output ("file changed as we read it").
-    const ts = new Date();
-    const y = String(ts.getFullYear());
-    const m = String(ts.getMonth() + 1).padStart(2, "0");
-    const d = String(ts.getDate()).padStart(2, "0");
-    const hh = String(ts.getHours()).padStart(2, "0");
-    const mm = String(ts.getMinutes()).padStart(2, "0");
-    const ss = String(ts.getSeconds()).padStart(2, "0");
-    const fileName = `invio-export-${y}${m}${d}-${hh}${mm}${ss}.tar.gz`;
-    outPath = await Deno.makeTempFile({
-      prefix: "invio-export-",
-      suffix: ".tar.gz",
-    });
-    const cmd = new Deno.Command("tar", {
-      args: ["-czf", outPath, "-C", tmpDir, "."],
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const result = await cmd.output();
-    if (result.code !== 0) {
-      const err = new TextDecoder().decode(result.stderr);
-      throw new Error(`tar failed: ${err}`);
-    }
-
-    // Read and return the tar.gz
-    const bytes = await Deno.readFile(outPath);
-    return new Response(bytes, {
-      headers: {
-        "Content-Type": "application/gzip",
-        "Content-Disposition": `attachment; filename=\"${fileName}\"`,
-        "Cache-Control": "no-store",
-      },
-    });
+    const data = await c.req.json();
+    const user = await createUserCtrl(data);
+    return c.json(user, 201);
   } catch (e) {
-    console.error("/export/full failed:", e);
-    return c.json({ error: "Failed to export data", details: String(e) }, 500);
-  } finally {
-    // Best-effort cleanup; keep tar result inside tmpDir so removal takes it too
-    if (tmpDir) {
-      try {
-        await Deno.remove(tmpDir, { recursive: true });
-      } catch { /* ignore */ }
-    }
-    if (outPath) {
-      try {
-        await Deno.remove(outPath);
-      } catch { /* ignore */ }
-    }
+    const msg = String(e);
+    if (/already exists/i.test(msg)) return c.json({ error: msg }, 409);
+    return c.json({ error: msg }, 400);
   }
 });
 
-// Recursive directory copy helper
-async function copyDirRecursive(src: string, dest: string) {
-  await Deno.mkdir(dest, { recursive: true });
-  for await (const entry of Deno.readDir(src)) {
-    const from = `${src}/${entry.name}`;
-    const to = `${dest}/${entry.name}`;
-    if (entry.isDirectory) {
-      await copyDirRecursive(from, to);
-    } else if (entry.isFile) {
-      await Deno.copyFile(from, to);
-    } else if (entry.isSymlink) {
-      try {
-        const target = await Deno.readLink(from);
-        await Deno.symlink(target, to);
-      } catch {
-        // skip problematic symlinks
-      }
+// GET /users/:id — get user details
+adminRoutes.get("/users/:id", requirePermission("users", "read"), (c) => {
+  const id = c.req.param("id");
+  const user = getUserByIdCtrl(id);
+  if (!user) return c.json({ error: "User not found" }, 404);
+  return c.json(user);
+});
+
+// PUT /users/:id — update user
+adminRoutes.put("/users/:id", requirePermission("users", "update"), async (c) => {
+  const id = c.req.param("id");
+  try {
+    const data = await c.req.json();
+    const currentUser = getAuthUser(c);
+
+    // Prevent admin from demoting themselves
+    if (currentUser.id === id && data.isAdmin === false) {
+      return c.json({ error: "Cannot remove your own admin status" }, 400);
     }
+    // Prevent admin from deactivating themselves
+    if (currentUser.id === id && data.isActive === false) {
+      return c.json({ error: "Cannot deactivate your own account" }, 400);
+    }
+
+    const user = await updateUserCtrl(id, data);
+    return c.json(user);
+  } catch (e) {
+    const msg = String(e);
+    if (/already exists/i.test(msg)) return c.json({ error: msg }, 409);
+    if (/not found/i.test(msg)) return c.json({ error: msg }, 404);
+    return c.json({ error: msg }, 400);
   }
-}
+});
+
+// DELETE /users/:id — delete user
+adminRoutes.delete("/users/:id", requirePermission("users", "delete"), (c) => {
+  const id = c.req.param("id");
+  try {
+    deleteUserCtrl(id);
+    return c.json({ success: true });
+  } catch (e) {
+    const msg = String(e);
+    if (/not found/i.test(msg)) return c.json({ error: msg }, 404);
+    if (/last admin/i.test(msg)) return c.json({ error: msg }, 400);
+    return c.json({ error: msg }, 400);
+  }
+});
+
+export { adminRoutes };

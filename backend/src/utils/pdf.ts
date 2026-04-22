@@ -6,8 +6,6 @@ import {
   PDFNumber,
   PDFString,
 } from "pdf-lib";
-// Use Puppeteer (headless Chrome) for HTML -> PDF rendering instead of wkhtmltopdf
-import puppeteer from "puppeteer-core";
 import { generateInvoiceXML, XMLProfile } from "./xmlProfiles.ts";
 import { generateZugferdXMP } from "./xmp.ts";
 import { fromFileUrl, join } from "std/path";
@@ -17,11 +15,14 @@ import {
   TemplateContext,
 } from "../types/index.ts";
 import {
+  contentTypeFromLogoPath,
+  resolveLogoFsPathFromPublicPath,
+} from "./logoStorage.ts";
+import {
   getTemplateById,
   renderTemplate as renderTpl,
 } from "../controllers/templates.ts";
 import { getDefaultTemplate } from "../controllers/templates.ts";
-import { resolveChromiumLaunchConfig } from "./chromium.ts";
 import { getInvoiceLabels } from "../i18n/translations.ts";
 // pdf-lib is used to embed XML attachments and tweak metadata after rendering
 
@@ -45,6 +46,52 @@ function escapeHtml(value: unknown): string {
 
 function _escapeHtmlWithBreaks(value: unknown): string {
   return escapeHtml(value).replace(/\r?\n/g, "<br />");
+}
+
+const CITY_FIRST_POSTAL_COUNTRIES = new Set([
+  "US",
+  "GB",
+  "BR",
+  "AU",
+  "CA",
+  "NZ",
+  "IE",
+  "MX",
+]);
+
+type PostalCityFormat = "auto" | "city-postal" | "postal-city";
+
+function normalizePostalCityFormat(value?: string): PostalCityFormat {
+  if (value === "city-postal" || value === "postal-city") return value;
+  return "auto";
+}
+
+function formatPostalCityLine(
+  postalCode?: string,
+  city?: string,
+  countryCode?: string,
+  format?: string,
+): string | undefined {
+  const postal = (postalCode || "").trim();
+  const place = (city || "").trim();
+  if (!postal && !place) return undefined;
+  if (!postal) return place;
+  if (!place) return postal;
+
+  const normalizedFormat = normalizePostalCityFormat(format);
+  if (normalizedFormat === "city-postal") {
+    // City + Postal formats frequently expect a comma for readable locality. Example: Boston, 02110
+    return `${place}, ${postal}`;
+  }
+  if (normalizedFormat === "postal-city") {
+    return `${postal} ${place}`;
+  }
+
+  const country = (countryCode || "").trim().toUpperCase();
+  if (CITY_FIRST_POSTAL_COUNTRIES.has(country)) {
+    return `${place} ${postal}`;
+  }
+  return `${postal} ${place}`;
 }
 
 const BLOCKED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -120,6 +167,34 @@ type WithLogo = BusinessSettings & {
   brandLayout?: string;
 };
 
+function normalizeLogoUrlForRender(
+  logo?: string,
+  forceAbsolute = false,
+): string | undefined {
+  if (!logo) return undefined;
+  const value = logo.trim();
+  if (!value) return undefined;
+  if (value.startsWith("data:")) return value;
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith("/")) {
+    if (forceAbsolute) {
+      const fsPath = resolveLogoFsPathFromPublicPath(value);
+      if (fsPath) {
+        const normalized = fsPath.replaceAll("\\", "/").replace(/^\/*/, "/");
+        return `file://${normalized}`;
+      }
+    }
+    if (!forceAbsolute) return value;
+    const base = Deno.env.get("BASE_URL") || "http://localhost:3000";
+    try {
+      return new URL(value, base).toString();
+    } catch {
+      return value;
+    }
+  }
+  return value;
+}
+
 function formatMoney(
   value: number,
   currency: string,
@@ -157,6 +232,17 @@ async function inlineLogoIfPossible(
   };
 
   try {
+    if (url.startsWith("/") && resolveLogoFsPathFromPublicPath(url)) {
+      const fsPath = resolveLogoFsPathFromPublicPath(url);
+      if (fsPath) {
+        const file = await Deno.readFile(fsPath);
+        return {
+          ...settings,
+          logoUrl: toDataUrl(file, contentTypeFromLogoPath(fsPath)),
+        } as unknown as BusinessSettings;
+      }
+    }
+
     const remote = tryParseSafeRemoteUrl(url);
     if (remote) {
       const res = await fetch(remote);
@@ -192,17 +278,17 @@ function buildContext(
   dateFormat?: string,
   numberFormat?: "comma" | "period",
   localeOverride?: string,
+  forceAbsoluteLogoUrl = false,
 ): TemplateContext & { logoUrl?: string; brandLogoLeft?: boolean } {
   const requestedLocale = localeOverride ?? invoice.locale ?? settings?.locale;
   const { locale: resolvedLocale, labels } = getInvoiceLabels(requestedLocale);
   const currency = invoice.currency || settings?.currency || "USD";
-  const companyPostalCity = (() => {
-    const parts = [
-      (settings?.companyPostalCode || "").trim(),
-      (settings?.companyCity || "").trim(),
-    ].filter(Boolean);
-    return parts.length > 0 ? parts.join(" ") : undefined;
-  })();
+  const companyPostalCity = formatPostalCityLine(
+    settings?.companyPostalCode,
+    settings?.companyCity,
+    settings?.companyCountryCode,
+    settings?.postalCityFormat,
+  );
   const taxLabel = (settings?.taxLabel && String(settings.taxLabel).trim())
     ? String(settings.taxLabel).trim()
     : labels.taxLabel;
@@ -232,7 +318,7 @@ function buildContext(
   return {
     // Company
     companyName: settings?.companyName || "Your Company",
-    companyAddress: settings?.companyAddress || "",
+    companyAddress: _escapeHtmlWithBreaks(settings?.companyAddress || ""),
     companyCity: (settings?.companyCity || "").trim() || undefined,
     companyPostalCode: (settings?.companyPostalCode || "").trim() || undefined,
     companyPostalCity,
@@ -252,17 +338,16 @@ function buildContext(
     customerContactName: invoice.customer.contactName,
     customerEmail: invoice.customer.email,
     customerPhone: invoice.customer.phone,
-    customerAddress: invoice.customer.address,
+    customerAddress: _escapeHtmlWithBreaks(invoice.customer.address),
     customerCity: invoice.customer.city,
     customerPostalCode: invoice.customer.postalCode,
     customerCountryCode: invoice.customer.countryCode,
-    customerPostalCity: (() => {
-      const parts = [
-        (invoice.customer.postalCode || "").trim(),
-        (invoice.customer.city || "").trim(),
-      ].filter(Boolean);
-      return parts.length > 0 ? parts.join(" ") : undefined;
-    })(),
+    customerPostalCity: formatPostalCityLine(
+      invoice.customer.postalCode,
+      invoice.customer.city,
+      invoice.customer.countryCode,
+      settings?.postalCityFormat,
+    ),
     customerTaxId: invoice.customer.taxId,
 
     // Items
@@ -310,8 +395,11 @@ function buildContext(
 
     // Non-mustache extras consumed by templates
     // Prefer inlined data URL if available; otherwise pass through the provided logo value
-    logoUrl: (settings as WithLogo | undefined)?.logoUrl ||
+    logoUrl: normalizeLogoUrlForRender(
+      (settings as WithLogo | undefined)?.logoUrl ||
       (settings as WithLogo | undefined)?.logo,
+      forceAbsoluteLogoUrl,
+    ),
     // Permanently use logo-left layout
     brandLogoLeft: true,
   } as TemplateContext & { logoUrl?: string; brandLogoLeft?: boolean };
@@ -324,57 +412,43 @@ export async function generateInvoicePDF(
   customHighlightColor?: string,
   opts?: { embedXmlProfileId?: string; embedXml?: boolean; xmlOptions?: Record<string, unknown>; dateFormat?: string; numberFormat?: "comma" | "period"; locale?: string },
 ): Promise<Uint8Array> {
-  // Inline remote logo when possible for robust HTML rendering
-  const inlined = await inlineLogoIfPossible(businessSettings);
+  // Keep logos as normal URLs/files for WeasyPrint.
+  // Data URLs significantly slow down rendering for larger images.
+  const renderSettings = businessSettings;
   const html = buildInvoiceHTML(
     invoiceData,
-    inlined,
+    renderSettings,
     templateId,
     customHighlightColor,
     opts?.dateFormat,
     opts?.numberFormat,
-    opts?.locale ?? invoiceData.locale ?? inlined?.locale,
+    opts?.locale ?? invoiceData.locale ?? renderSettings?.locale,
+    true,
   );
-  // Render via Puppeteer (Chromium)
-  let pdfBytes: Uint8Array;
-  try {
-    pdfBytes = await tryPuppeteerPdf(html);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Chromium-based PDF rendering failed: ${msg}`);
-  }
-
-  const pdfaResult = await convertPdfToPdfA3(pdfBytes);
-  if (pdfaResult) {
-    pdfBytes = pdfaResult;
-  } else {
-    console.warn(
-      "Ghostscript PDF/A-3 conversion unavailable or failed; continuing with source PDF.",
-    );
-  }
-
-  // Optionally embed XML profile as an attachment if requested and we have a PDF (browser or fallback)
-  if (pdfBytes && opts?.embedXml) {
+  const attachments: Array<{ fileName: string; bytes: Uint8Array }> = [];
+  if (opts?.embedXml) {
     try {
       const profileId = opts.embedXmlProfileId || "ubl21";
-      const { xml, profile } = generateInvoiceXML(profileId, invoiceData, inlined || ({} as BusinessSettings));
-      const fileName = `invoice-${invoiceData.invoiceNumber || invoiceData.id}.${profile.fileExtension}`;
-      const xmlBytes = new TextEncoder().encode(xml);
-      pdfBytes = await embedXmlAttachment(
-        pdfBytes,
-        xmlBytes,
-        fileName,
-        profile.mediaType || "application/xml",
-        `${profile.name} export embedded by Invio`,
-        opts?.locale || invoiceData.locale || inlined?.locale || "en-US",
-        profile,
+      const { xml, profile } = generateInvoiceXML(
+        profileId,
+        invoiceData,
+        renderSettings || ({} as BusinessSettings),
       );
+      attachments.push({
+        fileName: `invoice-${invoiceData.invoiceNumber || invoiceData.id}.${profile.fileExtension}`,
+        bytes: new TextEncoder().encode(xml),
+      });
     } catch (error) {
-      console.warn("Failed to embed XML attachment:", error);
-      // Continue without attachment to avoid breaking download
+      console.warn("Failed to prepare XML attachment:", error);
     }
   }
-  return pdfBytes as Uint8Array;
+
+  try {
+    return await renderPdfWithWeasyPrint(html, attachments);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`WeasyPrint PDF rendering failed: ${msg}`);
+  }
 }
 
 export function buildInvoiceHTML(
@@ -385,6 +459,7 @@ export function buildInvoiceHTML(
   dateFormat?: string,
   numberFormat?: "comma" | "period",
   localeOverride?: string,
+  forceAbsoluteLogoUrl = false,
 ): string {
   const ctx = buildContext(
     invoice,
@@ -393,6 +468,7 @@ export function buildInvoiceHTML(
     dateFormat,
     numberFormat,
     localeOverride,
+    forceAbsoluteLogoUrl,
   );
   const hl = normalizeHex(highlight) || "#2563eb";
   const hlLight = lighten(hl, 0.86);
@@ -421,228 +497,109 @@ export function buildInvoiceHTML(
   });
 }
 
-async function tryPuppeteerPdf(html: string): Promise<Uint8Array> {
-  const os = Deno.build.os;
-  const isWindows = os === "windows";
-  const isLinux = os === "linux";
-
-  const cleanupUserDataDir = async (dir?: string) => {
-    if (!dir) return;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await Deno.remove(dir, { recursive: true });
-        break;
-      } catch (err) {
-        const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
-        const transient = msg.includes("ebusy") || msg.includes("busy") || msg.includes("access is denied") ||
-          msg.includes("eperm") || msg.includes("locked");
-        if (!transient) break;
-        await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
-      }
-    }
-  };
-
-  const baseArgs = [
-    "--font-render-hinting=medium",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-extensions",
-    "--disable-background-networking",
-    "--disable-sync",
-    "--metrics-recording-only",
-    "--mute-audio",
-    "--hide-scrollbars",
-  ];
-  // Linux containers commonly need sandbox disabled.
-  // On Windows/macOS these flags are unnecessary and can sometimes cause odd behavior.
-  const forceNoSandbox = (Deno.env.get("INVIO_PUPPETEER_NO_SANDBOX") || "").trim() === "1";
-  if (isLinux || forceNoSandbox) {
-    baseArgs.push("--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage");
-  }
-  if (isWindows) {
-    baseArgs.push("--disable-gpu", "--disable-software-rasterizer");
-  }
-
-  const looksLikeTargetClosed = (err: unknown): boolean => {
-    const msg = err instanceof Error ? err.message : String(err);
-    return msg.includes("Target closed") || msg.includes("IO.read") || msg.includes("Protocol error (IO.read)");
-  };
-
-  const renderOnce = async (extraArgs: string[] = []): Promise<Uint8Array> => {
-    let userDataDir: string | undefined;
-    const { executablePath, channel } = await resolveChromiumLaunchConfig();
-
-    const dumpIo = (Deno.env.get("INVIO_PUPPETEER_DUMPIO") || "").trim() === "1";
-    const pipePref = (Deno.env.get("INVIO_PUPPETEER_PIPE") || "").trim();
-    const usePipe = pipePref
-      ? pipePref === "1"
-      : isWindows;
-
-    const launchOptions: NonNullable<Parameters<typeof puppeteer.launch>[0]> = {
-      headless: true,
-      args: [...baseArgs, ...extraArgs],
-      // Give Chromium a little more time on slower Windows machines.
-      timeout: 60000,
-      protocolTimeout: 60000,
-      dumpio: dumpIo,
-      pipe: usePipe,
-    };
-
-    try {
-      userDataDir = await Deno.makeTempDir({ prefix: "invio-puppeteer-profile-" });
-      (launchOptions as { userDataDir?: string }).userDataDir = userDataDir;
-    } catch {
-      userDataDir = undefined;
-    }
-
-    if (executablePath) {
-      launchOptions.executablePath = executablePath;
-    } else if (channel) {
-      (launchOptions as { channel?: string }).channel = channel;
-    }
-
-    let browser: any;
-    let page: any;
-    try {
-      browser = await puppeteer.launch(launchOptions);
-      page = await browser.newPage();
-      await page.setContent(html, { waitUntil: "networkidle0", timeout: 30000 });
-      const pdf = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        preferCSSPageSize: true,
-        margin: { top: "15mm", bottom: "15mm", left: "15mm", right: "15mm" },
-      });
-      return new Uint8Array(pdf);
-    } finally {
-      if (page) {
-        try {
-          await page.close();
-        } catch {
-          // ignore
-        }
-      }
-      if (browser) {
-        try {
-          await browser.close();
-        } catch {
-          // ignore
-        }
-      }
-      await cleanupUserDataDir(userDataDir);
-    }
-  };
-
-  try {
-    return await renderOnce();
-  } catch (err) {
-    if (looksLikeTargetClosed(err)) {
-      // Retry once; Chromium can exit early on some Windows setups (AV hooks, GPU/driver quirks).
-      return await renderOnce(["--disable-features=RendererCodeIntegrity"]);
-    }
-    throw err;
-  }
-}
-
-async function resolveGhostscriptExecutable(): Promise<string | null> {
+async function resolveWeasyPrintExecutable(): Promise<string | null> {
   const candidates: string[] = [];
   try {
-    const configured = Deno.env.get("GHOSTSCRIPT_BIN");
+    const configured = Deno.env.get("WEASYPRINT_BIN");
     if (configured && configured.trim().length > 0) {
-      candidates.push(configured);
+      candidates.push(configured.trim());
     }
-  } catch { /* ignore env access errors */ }
-  candidates.push("gs", "gswin64c", "gswin32c");
+  } catch {
+    // ignore env access errors
+  }
+  candidates.push("weasyprint");
 
   for (const candidate of candidates) {
     try {
       const probe = new Deno.Command(candidate, {
-        args: ["-version"],
+        args: ["--version"],
         stdout: "piped",
         stderr: "piped",
       });
       const { success } = await probe.output();
       if (success) return candidate;
-    } catch (_err) {
-      // ignore and continue searching
+    } catch {
+      // continue probing
     }
   }
   return null;
 }
 
-async function convertPdfToPdfA3(pdfBytes: Uint8Array): Promise<Uint8Array | null> {
-  const ghostscript = await resolveGhostscriptExecutable();
-  if (!ghostscript) return null;
+async function runWeasyPrint(
+  executable: string,
+  inputHtmlPath: string,
+  outputPdfPath: string,
+  attachmentPaths: string[],
+  includePdfVariant: boolean,
+): Promise<void> {
+  const args: string[] = [inputHtmlPath, outputPdfPath, "--media-type", "screen"];
+  if (includePdfVariant) {
+    args.push("--pdf-variant", "pdf/a-3b");
+  }
+  for (const p of attachmentPaths) {
+    args.push("--attachment", p);
+  }
 
-  const inputPath = await Deno.makeTempFile({ prefix: "invio-pdfa-src-", suffix: ".pdf" });
-  const outputPath = await Deno.makeTempFile({ prefix: "invio-pdfa-out-", suffix: ".pdf" });
-  const defPath = await Deno.makeTempFile({ prefix: "invio-pdfa-def-", suffix: ".ps" });
+  const cmd = new Deno.Command(executable, {
+    args,
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const { code, stderr } = await cmd.output();
+  if (code !== 0) {
+    throw new Error(new TextDecoder().decode(stderr) || `weasyprint exited with code ${code}`);
+  }
+}
+
+function resolveCssVariablesForWeasy(html: string): string {
+  const variableMap = new Map<string, string>();
+  const rootVarRegex = /--([a-zA-Z0-9_-]+)\s*:\s*([^;]+);/g;
+  let m: RegExpExecArray | null;
+  while ((m = rootVarRegex.exec(html)) !== null) {
+    variableMap.set(m[1], m[2].trim());
+  }
+
+  return html.replace(/var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]+)?\)/g, (full, name) => {
+    return variableMap.get(name) || full;
+  });
+}
+
+async function renderPdfWithWeasyPrint(
+  html: string,
+  attachments: Array<{ fileName: string; bytes: Uint8Array }>,
+): Promise<Uint8Array> {
+  const executable = await resolveWeasyPrintExecutable();
+  if (!executable) {
+    throw new Error(
+      "WeasyPrint binary not found. Install `weasyprint` and set WEASYPRINT_BIN if needed.",
+    );
+  }
+
+  const tmpDir = await Deno.makeTempDir({ prefix: "invio-weasy-" });
+  const htmlPath = join(tmpDir, "invoice.html");
+  const pdfPath = join(tmpDir, "invoice.pdf");
 
   try {
-    await Deno.writeFile(inputPath, pdfBytes);
+    const preparedHtml = resolveCssVariablesForWeasy(html);
+    await Deno.writeTextFile(htmlPath, preparedHtml);
 
-    // Resolve asset paths relative to this file.
-    // IMPORTANT: on Windows, `new URL(...).pathname` yields `/C:/...` which isn't a valid FS path.
-    const assetsDir = fromFileUrl(new URL("../assets/", import.meta.url));
-    const iccPathFs = join(assetsDir, "AdobeCompat-v2.icc");
-    const defTemplatePath = join(assetsDir, "PDFA_def.ps");
-    // Ghostscript/PostScript file paths are safest with forward slashes.
-    const iccPath = iccPathFs.replaceAll("\\", "/");
-
-    // Read and prepare PDFA_def.ps
-    let defContent = await Deno.readTextFile(defTemplatePath);
-    // Escape path for PostScript: (path)
-    // We need to handle backslashes if on Windows, but we are on Mac/Linux usually in this env.
-    // PostScript strings use parentheses.
-    defContent = defContent.replace("{{ICC_PROFILE_PATH}}", iccPath);
-    await Deno.writeTextFile(defPath, defContent);
-
-    const args = [
-      "-dNOPAUSE",
-      "-dBATCH",
-      "-dSAFER",
-      "-sDEVICE=pdfwrite",
-      "-dPDFA=3",
-      "-dPDFACompatibilityPolicy=1",
-      "-sColorConversionStrategy=UseDeviceIndependentColor",
-      "-sProcessColorModel=DeviceRGB",
-      "-dCompressPages=false",
-      "-dWriteObjStms=false",
-      "-dWriteXRefStm=false",
-      `--permit-file-read=${iccPathFs}`,
-      `-sOutputFile=${outputPath}`,
-      defPath, // The definition file must come before the input file
-      inputPath,
-    ];
-
-    const cmd = new Deno.Command(ghostscript, {
-      args,
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const { success, stderr } = await cmd.output();
-    if (!success) {
-      console.error(
-        "Ghostscript PDF/A-3 conversion failed:",
-        new TextDecoder().decode(stderr),
-      );
-      return null;
+    const attachmentPaths: string[] = [];
+    for (const attachment of attachments) {
+      const safeName = attachment.fileName.replaceAll("/", "_");
+      const path = join(tmpDir, safeName);
+      await Deno.writeFile(path, attachment.bytes);
+      attachmentPaths.push(path);
     }
-    const converted = await Deno.readFile(outputPath);
-    return converted;
-  } catch (err) {
-    console.error("Ghostscript PDF/A-3 conversion error:", err);
-    return null;
+
+    await runWeasyPrint(executable, htmlPath, pdfPath, attachmentPaths, true);
+
+    return await Deno.readFile(pdfPath);
   } finally {
     try {
-      await Deno.remove(inputPath);
-    } catch { /* ignore */ }
-    try {
-      await Deno.remove(outputPath);
-    } catch { /* ignore */ }
-    try {
-      await Deno.remove(defPath);
-    } catch { /* ignore */ }
+      await Deno.remove(tmpDir, { recursive: true });
+    } catch {
+      // ignore cleanup errors
+    }
   }
 }
 

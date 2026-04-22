@@ -1,45 +1,42 @@
-# Invio Frontend (Deno Fresh)
+# sv
 
-Modern, minimalist admin UI for Invio backend.
+Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
 
-- Framework: Fresh (SSR + islands)
-- Auth: JWT bearer sessions (stored as HttpOnly cookie; proxied to backend)
-- Features:
-  - Login/logout
-  - Dashboard summary
-  - Invoices: list, filter (server-rendered), view, edit, duplicate,
-    publish/unpublish, status updates, download PDF, public link
-  - Customers: list, view, create, edit, delete
-  - Settings: company details, logo, default template, highlight color
-  - Templates UI integrated into Settings
+## Creating a project
 
-## Dev
+If you're seeing this, you've probably already done this step. Congrats!
 
-Requires Deno 1.42+.
-
-Environment:
-
-- `BACKEND_URL` — backend base URL (default http://localhost:3000)
-- `FRONTEND_SECURE_HEADERS_DISABLED` — set to `true` to disable hardened headers in development
-- `FRONTEND_CONTENT_SECURITY_POLICY` — override default CSP if custom assets are required
-- `ENABLE_HSTS` — set to `true` to emit Strict-Transport-Security (only when served over HTTPS)
-
-Run:
-
-```bash
-deno task start
+```sh
+# create a new project
+npx sv create my-app
 ```
 
-Docker build (ensure the dashboard shows the correct version):
+To recreate this project with the same configuration:
 
-```bash
-cp ../VERSION ./VERSION  # or pass --build-arg APP_VERSION=$(cat ../VERSION)
-docker build -t invio-frontend .
+```sh
+# recreate this project
+npx sv@0.12.8 create --template minimal --types ts --no-install frontend-svelte
 ```
 
-## Notes
+## Developing
 
-- PDF/HTML generation links no longer take query parameters; output uses the
-  saved Settings template and highlight.
-- UI uses DaisyUI components and aims for good accessibility (contrast, lang
-  attribute, no client-side JS for exports).
+Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+
+```sh
+npm run dev
+
+# or start the server and open the app in a new browser tab
+npm run dev -- --open
+```
+
+## Building
+
+To create a production version of your app:
+
+```sh
+npm run build
+```
+
+You can preview the production build with `npm run preview`.
+
+> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.
