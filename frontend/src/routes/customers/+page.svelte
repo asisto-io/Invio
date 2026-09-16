@@ -1,6 +1,9 @@
 <script lang="ts">
   import { UserPlus } from "lucide-svelte";
   import { getContext } from "svelte";
+  import { formatPostalCityLine } from "$lib/address";
+
+  const getLoc = getContext("localization") as () => any;
 
   let { data } = $props();
   let t = getContext("i18n") as (key: string) => string;
@@ -28,7 +31,7 @@
 
 <!-- Mobile Card View -->
 <div class="block space-y-3 md:hidden">
-  {#each customers as c}
+  {#each customers as c (c.id)}
     <a href={`/customers/${c.id}`} class="card bg-base-100 border-base-300 border transition-shadow hover:shadow-md">
       <div class="card-body p-4">
         <div class="link font-semibold">{c.name || c.id}</div>
@@ -56,15 +59,21 @@
     <thead class="bg-base-200 text-base-content">
       <tr class="font-medium">
         <th>{t("Name")}</th>
+        <th>{t("Contact Name")}</th>
+        <th>{t("Address")}</th>
+        <th>{t("City")} / {t("Postal Code")}</th>
         <th>{t("Email")}</th>
       </tr>
     </thead>
     <tbody>
-      {#each customers as c}
+      {#each customers as c (c.id)}
         <tr class="hover">
           <td>
             <a class="link" href={`/customers/${c.id}`}>{c.name || c.id}</a>
           </td>
+          <td class="opacity-70">{c.contactName || ""}</td>
+          <td class="opacity-70">{c.address || ""}</td>
+          <td class="opacity-70">{formatPostalCityLine(c.city, c.postalCode, c.countryCode, getLoc()?.postalCityFormat) || "-"}</td>
           <td class="opacity-70">{c.email || ""}</td>
         </tr>
       {/each}

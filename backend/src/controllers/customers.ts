@@ -1,8 +1,5 @@
 import { getDatabase } from "../database/init.ts";
-import {
-  CreateCustomerRequest,
-  Customer,
-} from "../types/index.ts";
+import { CreateCustomerRequest, Customer } from "../types/index.ts";
 import { generateUUID } from "../utils/uuid.ts";
 
 const mapRowToCustomer = (row: unknown[]): Customer => ({
@@ -15,9 +12,10 @@ const mapRowToCustomer = (row: unknown[]): Customer => ({
   countryCode: (row[6] ?? undefined) as string | undefined,
   taxId: (row[7] ?? undefined) as string | undefined,
   createdAt: new Date(row[8] as string),
-  // Optional city/postal_code columns if present at the end
+  // Optional city/postal_code/customer_number columns if present at the end
   city: (row[9] ?? undefined) as string | undefined,
   postalCode: (row[10] ?? undefined) as string | undefined,
+  customerNumber: (row[11] ?? undefined) as number | undefined,
 });
 
 export const getCustomers = () => {
@@ -26,7 +24,7 @@ export const getCustomers = () => {
   let results: unknown[][] = [];
   try {
     results = db.query(
-      "SELECT id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code FROM customers ORDER BY created_at DESC",
+      "SELECT id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code, customer_number FROM customers ORDER BY created_at DESC",
     ) as unknown[][];
   } catch (_e) {
     // fallback older schema
@@ -48,7 +46,7 @@ export const getCustomerById = (id: string): Customer | null => {
   let results: unknown[][] = [];
   try {
     results = db.query(
-      "SELECT id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code FROM customers WHERE id = ?",
+      "SELECT id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code, customer_number FROM customers WHERE id = ?",
       [id],
     ) as unknown[][];
   } catch (_e) {
@@ -74,10 +72,18 @@ const toNullable = (v?: string): string | null => {
   return s.length ? s : null;
 };
 
+const nextCustomerNumber = (db: ReturnType<typeof getDatabase>): number => {
+  const rows = db.query(
+    "SELECT COALESCE(MAX(customer_number), 0) FROM customers",
+  ) as unknown[][];
+  return Number((rows[0] as unknown[])[0]) + 1;
+};
+
 export const createCustomer = (data: CreateCustomerRequest): Customer => {
   const db = getDatabase();
   const customerId = generateUUID();
   const now = new Date();
+  const customerNumber = nextCustomerNumber(db);
 
   // Normalize optional fields: store NULLs for empty strings
   const contactName = toNullable(data.contactName);
@@ -92,8 +98,8 @@ export const createCustomer = (data: CreateCustomerRequest): Customer => {
   try {
     db.query(
       `
-      INSERT INTO customers (id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO customers (id, name, contact_name, email, phone, address, country_code, tax_id, created_at, city, postal_code, customer_number)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       [
         customerId,
@@ -107,6 +113,7 @@ export const createCustomer = (data: CreateCustomerRequest): Customer => {
         now,
         city,
         postal,
+        customerNumber,
       ],
     );
   } catch (_e) {
@@ -136,16 +143,7 @@ export const createCustomer = (data: CreateCustomerRequest): Customer => {
         INSERT INTO customers (id, name, email, phone, address, country_code, tax_id, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
-        [
-          customerId,
-          data.name,
-          email,
-          phone,
-          address,
-          countryCode,
-          taxId,
-          now,
-        ],
+        [customerId, data.name, email, phone, address, countryCode, taxId, now],
       );
     }
   }
@@ -163,6 +161,7 @@ export const createCustomer = (data: CreateCustomerRequest): Customer => {
     createdAt: now,
     city: city ?? undefined,
     postalCode: postal ?? undefined,
+    customerNumber,
   };
 };
 
@@ -177,7 +176,8 @@ export const updateCustomer = (
 
   const next = {
     name: data.name ?? existing.name,
-    contactName: data.contactName === undefined ? existing.contactName : undefined,
+    contactName:
+      data.contactName === undefined ? existing.contactName : undefined,
     email: data.email === undefined ? existing.email : undefined,
     phone: data.phone === undefined ? existing.phone : undefined,
     address: data.address === undefined ? existing.address : undefined,
@@ -185,35 +185,43 @@ export const updateCustomer = (
   } as Partial<Customer>;
 
   // If provided, coerce empty to NULL
-  const contactName = data.contactName !== undefined
-    ? toNullable(data.contactName)
-    : (existing.contactName ?? null);
-  const email = data.email !== undefined
-    ? toNullable(data.email)
-    : (existing.email ?? null);
-  const phone = data.phone !== undefined
-    ? toNullable(data.phone)
-    : (existing.phone ?? null);
-  const address = data.address !== undefined
-    ? toNullable(data.address)
-    : (existing.address ?? null);
-  const countryCode = data.countryCode !== undefined
-    ? toNullable(data.countryCode)
-    : (existing.countryCode ?? null);
-  const taxId = data.taxId !== undefined
-    ? toNullable(data.taxId)
-    : (existing.taxId ?? null);
-  const city = (data as { city?: string }).city !== undefined
-    ? toNullable((data as { city?: string }).city)
-    : (existing.city ?? null);
-  const postal = (data as { postalCode?: string }).postalCode !== undefined
-    ? toNullable((data as { postalCode?: string }).postalCode)
-    : (existing.postalCode ?? null);
+  const contactName =
+    data.contactName !== undefined
+      ? toNullable(data.contactName)
+      : (existing.contactName ?? null);
+  const email =
+    data.email !== undefined
+      ? toNullable(data.email)
+      : (existing.email ?? null);
+  const phone =
+    data.phone !== undefined
+      ? toNullable(data.phone)
+      : (existing.phone ?? null);
+  const address =
+    data.address !== undefined
+      ? toNullable(data.address)
+      : (existing.address ?? null);
+  const countryCode =
+    data.countryCode !== undefined
+      ? toNullable(data.countryCode)
+      : (existing.countryCode ?? null);
+  const taxId =
+    data.taxId !== undefined
+      ? toNullable(data.taxId)
+      : (existing.taxId ?? null);
+  const city =
+    (data as { city?: string }).city !== undefined
+      ? toNullable((data as { city?: string }).city)
+      : (existing.city ?? null);
+  const postal =
+    (data as { postalCode?: string }).postalCode !== undefined
+      ? toNullable((data as { postalCode?: string }).postalCode)
+      : (existing.postalCode ?? null);
 
   try {
     db.query(
       `
-      UPDATE customers SET 
+      UPDATE customers SET
         name = ?, contact_name = ?, email = ?, phone = ?, address = ?, country_code = ?, tax_id = ?, city = ?, postal_code = ?
       WHERE id = ?
     `,
@@ -234,7 +242,7 @@ export const updateCustomer = (
     try {
       db.query(
         `
-        UPDATE customers SET 
+        UPDATE customers SET
           name = ?, email = ?, phone = ?, address = ?, country_code = ?, tax_id = ?, city = ?, postal_code = ?
         WHERE id = ?
       `,
@@ -253,19 +261,11 @@ export const updateCustomer = (
     } catch (_e2) {
       db.query(
         `
-        UPDATE customers SET 
+        UPDATE customers SET
           name = ?, email = ?, phone = ?, address = ?, country_code = ?, tax_id = ?
         WHERE id = ?
       `,
-        [
-          next.name,
-          email,
-          phone,
-          address,
-          countryCode,
-          taxId,
-          id,
-        ],
+        [next.name, email, phone, address, countryCode, taxId, id],
       );
     }
   }

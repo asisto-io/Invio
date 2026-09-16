@@ -5,117 +5,183 @@ import {
   SESSION_COOKIE,
   DEFAULT_SESSION_MAX_AGE,
 } from "$lib/backend";
+import { getDemoMode } from "$lib/demo";
+import { env } from "$env/dynamic/private";
 
-export const load: PageServerLoad = async ({ locals }) => {
+export const load: PageServerLoad = async ({ locals, url }) => {
   if (locals.user) {
     throw redirect(303, "/dashboard");
   }
-
-  let demoMode = false;
-  try {
-    const resp = await fetch(`${BACKEND_URL}/api/v1/demo-mode`);
-    if (resp.ok) {
-      const body = await resp.json();
-      demoMode = body?.demoMode === true || body?.demoMode === "true";
-    }
-  } catch (e) {}
-
-  return { demoMode };
+  const oidcEnabled =
+    (env.OIDC_ENABLED || "false").toLowerCase() === "true";
+  const urlError = url.searchParams.get("error");
+  return {
+    oidcEnabled,
+    oidcError: urlError?.startsWith("oidc_")
+      ? "SSO login failed. Please try again or use username and password."
+      : null,
+  };
 };
-
 export const actions: Actions = {
-  default: async ({ request, cookies }) => {
+  login: async ({ request, cookies }) => {
     const form = await request.formData();
-    const username = String(form.get("username") || "");
-    const password = String(form.get("password") || "");
 
-    if (!username || !password) {
-      return fail(400, { error: "Missing credentials", username });
-    }
+    const username = String(form.get("username") ?? "").trim();
+    const password = String(form.get("password") ?? "").trim();
+    const twoFactorToken = String(form.get("twoFactorToken") ?? "").trim();
+    const totpToken = String(form.get("token") ?? "")
+      .replace(/\s+/g, "")
+      .trim();
+    const recoveryCode = String(form.get("recoveryCode") ?? "").trim();
 
-    try {
-      const resp = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
-      });
+    let resp: Response;
+    let data: any = null;
+
+    const isSecondStep = Boolean(twoFactorToken);
+    if (!isSecondStep) {
+      if (!username || !password) {
+        return fail(400, {
+          error: "Missing credentials",
+          username,
+        });
+      }
+
+      try {
+        resp = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ username, password }),
+        });
+      } catch {
+        return fail(500, {
+          error: "Unable to reach authentication server",
+          username,
+        });
+      }
+
+      try {
+        data = await resp.json();
+      } catch {
+        return fail(500, {
+          error: "Invalid server response",
+          username,
+        });
+      }
 
       if (!resp.ok) {
-        let parsedError: any = null;
-        try {
-          parsedError = await resp.json();
-        } catch {
-          try {
-            const text = await resp.text();
-            parsedError = text ? { error: text } : null;
-          } catch {
-            parsedError = null;
-          }
-        }
         if (resp.status === 401) {
           return fail(401, { error: "Invalid credentials", username });
         }
+
         if (resp.status === 429) {
-          const retryAfter = parsedError?.retryAfter;
+          const retryAfter = data?.retryAfter;
           const minutes = retryAfter ? Math.ceil(retryAfter / 60) : 15;
+
           return fail(429, {
             error:
-              "Too many login attempts. Please try again in {{minutes}} minute(s).",
+              "Too many login attempts. Try again in {{minutes}} minute(s).",
             errorParams: { minutes },
             username,
           });
         }
-        let message: string | null = null;
-        if (parsedError && typeof parsedError === "object") {
-          const candidate = parsedError.error ?? parsedError.message;
-          if (typeof candidate === "string" && candidate.trim().length > 0) {
-            message = candidate.trim();
-          }
-        } else if (
-          typeof parsedError === "string" &&
-          parsedError.trim().length > 0
-        ) {
-          message = parsedError.trim();
-        }
-        const msg = message ?? `${resp.status} ${resp.statusText}`;
-        return fail(400, { error: msg, username });
-      }
 
-      const data = (await resp.json()) as {
-        token?: string;
-        expiresIn?: number;
-      };
-      if (!data?.token) {
-        return fail(400, { error: "Login response missing token", username });
-      }
-
-      const maxAge = data.expiresIn || DEFAULT_SESSION_MAX_AGE;
-
-      cookies.set(SESSION_COOKIE, data.token, {
-        path: "/",
-        httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.COOKIE_SECURE !== "false",
-        maxAge: maxAge > 0 ? maxAge : undefined,
-      });
-    } catch (e) {
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      if (/401|403/.test(errorMessage)) {
-        return fail(401, { error: "Invalid credentials", username });
-      }
-      if (/5\d\d/.test(errorMessage)) {
-        return fail(500, {
-          error: "Server error. Please try again later.",
+        return fail(resp.status, {
+          error: data?.error ?? "Login failed",
           username,
         });
       }
+
+      if (data?.twoFactorRequired && data?.twoFactorToken) {
+        return {
+          twoFactorRequired: true,
+          twoFactorToken: data.twoFactorToken,
+          username,
+        };
+      }
+    } else {
+      const useRecovery = Boolean(recoveryCode);
+      if (!totpToken && !useRecovery) {
+        return fail(400, {
+          error: "Enter your 2FA code or recovery code",
+          twoFactorRequired: true,
+          twoFactorToken,
+          username,
+        });
+      }
+      const endpoint = useRecovery ? "recover-2fa" : "verify-2fa";
+      const payload = useRecovery
+        ? { twoFactorToken, recoveryCode }
+        : { twoFactorToken, token: totpToken };
+      try {
+        resp = await fetch(`${BACKEND_URL}/api/v1/auth/${endpoint}`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        return fail(500, {
+          error: "Unable to reach authentication server",
+          twoFactorRequired: true,
+          twoFactorToken,
+          username,
+        });
+      }
+      try {
+        data = await resp.json();
+      } catch {
+        return fail(500, {
+          error: "Invalid server response",
+          twoFactorRequired: true,
+          twoFactorToken,
+          username,
+        });
+      }
+      if (!resp.ok) {
+        return fail(resp.status, {
+          error: data?.error ?? "2FA verification failed",
+          twoFactorRequired: true,
+          twoFactorToken,
+          username,
+        });
+      }
+    }
+
+    if (!data?.token) {
       return fail(500, {
-        error:
-          "Unable to connect to server. Please check your connection and try again.",
+        error: "Login response missing token",
         username,
       });
     }
 
+    cookies.set(SESSION_COOKIE, data.token, {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+      maxAge: data.expiresIn ?? DEFAULT_SESSION_MAX_AGE,
+    });
+
     throw redirect(303, "/dashboard");
+  },
+
+  oidcLogin: async () => {
+    let resp: Response;
+    try {
+      resp = await fetch(`${BACKEND_URL}/api/v1/auth/oidc/authorize`);
+    } catch {
+      return fail(500, { error: "Unable to reach authentication server" });
+    }
+    if (!resp.ok) {
+      return fail(503, { error: "SSO login is not available" });
+    }
+    const data = await resp.json();
+    if (!data?.url) {
+      return fail(500, { error: "Invalid SSO response" });
+    }
+    throw redirect(303, data.url);
   },
 };

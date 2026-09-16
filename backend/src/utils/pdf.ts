@@ -8,7 +8,7 @@ import {
 } from "pdf-lib";
 import { generateInvoiceXML, XMLProfile } from "./xmlProfiles.ts";
 import { generateZugferdXMP } from "./xmp.ts";
-import { fromFileUrl, join } from "std/path";
+import { join } from "std/path";
 import {
   BusinessSettings,
   InvoiceWithDetails,
@@ -16,6 +16,7 @@ import {
 } from "../types/index.ts";
 import {
   contentTypeFromLogoPath,
+  normalizeStoredLogoReference,
   resolveLogoFsPathFromPublicPath,
 } from "./logoStorage.ts";
 import {
@@ -98,7 +99,10 @@ const BLOCKED_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function isPrivateIPv4Host(hostname: string): boolean {
   const parts = hostname.split(".").map((n) => Number(n));
-  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+  if (
+    parts.length !== 4 ||
+    parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)
+  ) {
     return false;
   }
   const [a, b] = parts;
@@ -150,9 +154,9 @@ function formatDate(d?: Date, format: string = "YYYY-MM-DD") {
   if (!d) return undefined;
   const date = new Date(d);
   const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
   if (format === "DD.MM.YYYY") {
     return `${day}.${month}.${year}`;
   }
@@ -172,7 +176,7 @@ function normalizeLogoUrlForRender(
   forceAbsolute = false,
 ): string | undefined {
   if (!logo) return undefined;
-  const value = logo.trim();
+  const value = normalizeStoredLogoReference(logo.trim());
   if (!value) return undefined;
   if (value.startsWith("data:")) return value;
   if (/^https?:\/\//i.test(value)) return value;
@@ -198,7 +202,7 @@ function normalizeLogoUrlForRender(
 function formatMoney(
   value: number,
   currency: string,
-  numberFormat: "comma" | "period" = "comma"
+  numberFormat: "comma" | "period" = "comma",
 ): string {
   // Create a custom locale based on the number format preference
   let locale: string;
@@ -217,7 +221,7 @@ function formatMoney(
   return new Intl.NumberFormat(locale, options).format(value);
 }
 
-async function inlineLogoIfPossible(
+async function _inlineLogoIfPossible(
   settings?: BusinessSettings,
 ): Promise<BusinessSettings | undefined> {
   if (!settings?.logo) return settings;
@@ -289,32 +293,45 @@ function buildContext(
     settings?.companyCountryCode,
     settings?.postalCityFormat,
   );
-  const taxLabel = (settings?.taxLabel && String(settings.taxLabel).trim())
+  const taxLabel = settings?.taxLabel && String(settings.taxLabel).trim()
     ? String(settings.taxLabel).trim()
     : labels.taxLabel;
   // Build tax summary from normalized taxes if present
-  let taxSummary = (invoice.taxes && invoice.taxes.length > 0)
+  let taxSummary = invoice.taxes && invoice.taxes.length > 0
     ? invoice.taxes.map((t) => ({
       label: `${taxLabel} ${t.percent}%`,
       percent: t.percent,
-      taxable: formatMoney(t.taxableAmount, currency, numberFormat || "comma"),
+      taxable: formatMoney(
+        t.taxableAmount,
+        currency,
+        numberFormat || "comma",
+      ),
       amount: formatMoney(t.taxAmount, currency, numberFormat || "comma"),
     }))
     : undefined;
   // Fallback: synthesize a single-row summary from invoice-level taxRate
-  if ((!taxSummary || taxSummary.length === 0) && (invoice.taxAmount > 0)) {
+  if ((!taxSummary || taxSummary.length === 0) && invoice.taxAmount > 0) {
     const percent = invoice.taxRate || 0;
     const taxableBase = Math.max(
       0,
       (invoice.subtotal || 0) - (invoice.discountAmount || 0),
     );
-    taxSummary = [{
-      label: `${taxLabel} ${percent}%`,
-      percent,
-      taxable: formatMoney(taxableBase, currency, numberFormat || "comma"),
-      amount: formatMoney(invoice.taxAmount, currency, numberFormat || "comma"),
-    }];
+    taxSummary = [
+      {
+        label: `${taxLabel} ${percent}%`,
+        percent,
+        taxable: formatMoney(taxableBase, currency, numberFormat || "comma"),
+        amount: formatMoney(
+          invoice.taxAmount,
+          currency,
+          numberFormat || "comma",
+        ),
+      },
+    ];
   }
+  const hasItemUnits = invoice.items.some(
+    (i) => typeof i.unit === "string" && i.unit.trim().length > 0,
+  );
   return {
     // Company
     companyName: settings?.companyName || "Your Company",
@@ -354,10 +371,14 @@ function buildContext(
     items: invoice.items.map((i) => ({
       description: i.description,
       quantity: i.quantity,
+      unit: typeof i.unit === "string" && i.unit.trim().length > 0
+        ? i.unit.trim()
+        : undefined,
       unitPrice: formatMoney(i.unitPrice, currency, numberFormat || "comma"),
       lineTotal: formatMoney(i.lineTotal, currency, numberFormat || "comma"),
       notes: i.notes,
     })),
+    hasItemUnits,
 
     // Totals
     subtotal: formatMoney(invoice.subtotal, currency, numberFormat || "comma"),
@@ -366,7 +387,9 @@ function buildContext(
       : undefined,
     discountPercentage: invoice.discountPercentage || undefined,
     taxRate: invoice.taxRate || undefined,
-    taxAmount: invoice.taxAmount > 0 ? formatMoney(invoice.taxAmount, currency, numberFormat || "comma") : undefined,
+    taxAmount: invoice.taxAmount > 0
+      ? formatMoney(invoice.taxAmount, currency, numberFormat || "comma")
+      : undefined,
     total: formatMoney(invoice.total, currency, numberFormat || "comma"),
     taxSummary,
     hasTaxSummary: Boolean(taxSummary && taxSummary.length > 0),
@@ -397,7 +420,7 @@ function buildContext(
     // Prefer inlined data URL if available; otherwise pass through the provided logo value
     logoUrl: normalizeLogoUrlForRender(
       (settings as WithLogo | undefined)?.logoUrl ||
-      (settings as WithLogo | undefined)?.logo,
+        (settings as WithLogo | undefined)?.logo,
       forceAbsoluteLogoUrl,
     ),
     // Permanently use logo-left layout
@@ -410,7 +433,14 @@ export async function generateInvoicePDF(
   businessSettings?: BusinessSettings,
   templateId?: string,
   customHighlightColor?: string,
-  opts?: { embedXmlProfileId?: string; embedXml?: boolean; xmlOptions?: Record<string, unknown>; dateFormat?: string; numberFormat?: "comma" | "period"; locale?: string },
+  opts?: {
+    embedXmlProfileId?: string;
+    embedXml?: boolean;
+    xmlOptions?: Record<string, unknown>;
+    dateFormat?: string;
+    numberFormat?: "comma" | "period";
+    locale?: string;
+  },
 ): Promise<Uint8Array> {
   // Keep logos as normal URLs/files for WeasyPrint.
   // Data URLs significantly slow down rendering for larger images.
@@ -435,7 +465,9 @@ export async function generateInvoicePDF(
         renderSettings || ({} as BusinessSettings),
       );
       attachments.push({
-        fileName: `invoice-${invoiceData.invoiceNumber || invoiceData.id}.${profile.fileExtension}`,
+        fileName: `invoice-${
+          invoiceData.invoiceNumber || invoiceData.id
+        }.${profile.fileExtension}`,
         bytes: new TextEncoder().encode(xml),
       });
     } catch (error) {
@@ -532,7 +564,12 @@ async function runWeasyPrint(
   attachmentPaths: string[],
   includePdfVariant: boolean,
 ): Promise<void> {
-  const args: string[] = [inputHtmlPath, outputPdfPath, "--media-type", "screen"];
+  const args: string[] = [
+    inputHtmlPath,
+    outputPdfPath,
+    "--media-type",
+    "screen",
+  ];
   if (includePdfVariant) {
     args.push("--pdf-variant", "pdf/a-3b");
   }
@@ -547,7 +584,9 @@ async function runWeasyPrint(
   });
   const { code, stderr } = await cmd.output();
   if (code !== 0) {
-    throw new Error(new TextDecoder().decode(stderr) || `weasyprint exited with code ${code}`);
+    throw new Error(
+      new TextDecoder().decode(stderr) || `weasyprint exited with code ${code}`,
+    );
   }
 }
 
@@ -559,9 +598,12 @@ function resolveCssVariablesForWeasy(html: string): string {
     variableMap.set(m[1], m[2].trim());
   }
 
-  return html.replace(/var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]+)?\)/g, (full, name) => {
-    return variableMap.get(name) || full;
-  });
+  return html.replace(
+    /var\(\s*--([a-zA-Z0-9_-]+)\s*(?:,[^)]+)?\)/g,
+    (full, name) => {
+      return variableMap.get(name) || full;
+    },
+  );
 }
 
 async function renderPdfWithWeasyPrint(
