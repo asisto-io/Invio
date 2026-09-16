@@ -2,6 +2,7 @@
   import { getContext, onMount, untrack } from "svelte";
   import { Plus, GripVertical } from "lucide-svelte";
   import { goto } from "$app/navigation";
+  import { generateId } from "$lib/utils/id";
 
   let { data, invoice = null, formId = "invoice-editor-form" } = $props();
   let initInvoice = untrack(() => invoice);
@@ -12,6 +13,10 @@
 
   let saving = $state(false);
   let error = $state("");
+  // Tracks whether the user manually edited the invoice number, as opposed to
+  // it just holding the auto-computed preview (which must not be submitted as
+  // an explicit override — see the customerId-aware preview effect below).
+  let invoiceNumberTouched = $state(false);
 
   let form = $state({
     customerId: initInvoice?.customerId || "",
@@ -32,15 +37,17 @@
     initInvoice?.items?.length
       ? initInvoice.items.map((i: any) => ({
           ...i,
-          id: crypto.randomUUID(),
+          id: generateId(),
+          unit: i.unit || "",
           productId: i.productId || "",
         }))
       : [
           {
-            id: crypto.randomUUID(),
+            id: generateId(),
             productId: "",
             description: "",
             quantity: 1,
+            unit: "",
             unitPrice: 0,
             taxPercent: 0,
             notes: "",
@@ -48,16 +55,43 @@
         ],
   );
 
-  let customers = $derived(data.customers || []);
+  // The API returns customers in creation order; sorting by name keeps the
+  // dropdown scannable once the list grows (locale-aware, so accented names
+  // land next to their base letter instead of after Z).
+  let customers = $derived(
+    [...(data.customers || [])].sort((a: any, b: any) =>
+      String(a?.name || "").localeCompare(String(b?.name || ""), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    ),
+  );
   let products = $derived(data.products || []);
   let taxDefinitions = $derived(data.taxDefinitions || []);
 
+  // Re-preview the next invoice number whenever the customer changes, so
+  // customer-scoped patterns ({CSEQ}, {CNUM}) show something representative.
+  // Only for new invoices, and only while the user hasn't typed their own
+  // number — the actual final number is always assigned server-side.
+  $effect(() => {
+    if (initInvoice || invoiceNumberTouched) return;
+    const customerId = form.customerId;
+    const qs = customerId ? `?customerId=${encodeURIComponent(customerId)}` : "";
+    fetch(`/api/v1/invoices/next-number${qs}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (d?.next && !invoiceNumberTouched) form.invoiceNumber = d.next;
+      })
+      .catch(() => {});
+  });
+
   function addItem() {
     items.push({
-      id: crypto.randomUUID(),
+      id: generateId(),
       productId: "",
       description: "",
       quantity: 1,
+      unit: "",
       unitPrice: 0,
       taxPercent: 0,
       notes: "",
@@ -73,6 +107,7 @@
 
     item.description = product.name || item.description;
     item.unitPrice = Number(product.unitPrice ?? product.unit_price ?? item.unitPrice ?? 0);
+    item.unit = String(product.unit ?? item.unit ?? "");
 
     if (form.taxMode === "line" && product.taxDefinitionId) {
       const taxDef = taxDefinitions.find((t: any) => t.id === product.taxDefinitionId);
@@ -167,10 +202,15 @@
     try {
       const payload = {
         ...form,
+        // Only send an explicit invoice number when creating if the user actually
+        // typed one; otherwise let the backend assign it using the real customerId.
+        invoiceNumber: !initInvoice && !invoiceNumberTouched ? undefined : form.invoiceNumber,
         pricesIncludeTax: form.pricesIncludeTax === "true",
         items: items.map((i) => ({
+          productId: i.productId || undefined,
           description: i.description,
           quantity: Number(i.quantity),
+          unit: typeof i.unit === "string" ? i.unit.trim() : "",
           unitPrice: Number(i.unitPrice),
           taxPercent: Number(i.taxPercent || 0),
           notes: i.notes,
@@ -227,7 +267,7 @@
       </div>
       <select class="select select-bordered w-full" bind:value={form.customerId} required>
         <option value="">{t("Select customer")}</option>
-        {#each customers as c}
+        {#each customers as c (c.id)}
           <option value={c.id}>{c.name}</option>
         {/each}
       </select>
@@ -237,7 +277,7 @@
       <div class="label">
         <span class="label-text">{t("Invoice Number")}</span>
       </div>
-      <input type="text" class="input input-bordered w-full" placeholder={t("e.g. INV-2025-001")} bind:value={form.invoiceNumber} />
+      <input type="text" class="input input-bordered w-full" placeholder={t("e.g. INV-2025-001")} bind:value={form.invoiceNumber} oninput={() => (invoiceNumberTouched = true)} />
     </label>
 
     <label class="form-control">
@@ -281,7 +321,7 @@
   <div>
     <div class="mb-2 flex items-center justify-between">
       <div class="block text-sm font-semibold">
-        {t("IStems")} <span class="text-error">*</span>
+        {t("Items")} <span class="text-error">*</span>
       </div>
       <button type="button" class="btn btn-sm" onclick={addItem}>
         <Plus size={16} />
@@ -296,6 +336,7 @@
       {/if}
       <div class="min-w-0 flex-1 pl-3">{t("Description")}</div>
       <div class="w-16 shrink-0 text-center sm:w-20">{t("Quantity")}</div>
+      <div class="w-24 shrink-0 text-center">{t("Unit")}</div>
       <div class="w-24 shrink-0 text-center">{t("Price")}</div>
       {#if form.taxMode === "line"}
         <div class="w-20 shrink-0 text-center">{t("Tax %")}</div>
@@ -323,14 +364,15 @@
           {#if products.length > 0}
             <select class="select select-bordered w-44 max-w-xs shrink-0" bind:value={item.productId} onchange={(e) => applyProductSelection(item, (e.currentTarget as HTMLSelectElement).value)}>
               <option value="">{t("Select product")}</option>
-              {#each products as p}
+              {#each products as p (p.id)}
                 <option value={p.id}>{p.name}{p.sku ? ` (${p.sku})` : ""}</option>
               {/each}
             </select>
           {/if}
 
           <input class="input input-bordered w-full min-w-0" bind:value={item.description} placeholder={t("Description")} required />
-          <input type="number" min="0" step="1" class="input input-bordered w-16 shrink-0 text-center sm:w-20" bind:value={item.quantity} />
+          <input type="number" min="0" step="any" class="input input-bordered w-16 shrink-0 text-center sm:w-20" bind:value={item.quantity} />
+          <input class="input input-bordered w-24 shrink-0 text-center" bind:value={item.unit} placeholder={t("Unit")} />
           <input type="number" min="0" step="any" class="input input-bordered w-24 shrink-0 text-center" bind:value={item.unitPrice} />
           {#if form.taxMode === "line"}
             <input type="number" min="0" step="any" class="input input-bordered w-20 shrink-0 text-center" bind:value={item.taxPercent} placeholder="%" />

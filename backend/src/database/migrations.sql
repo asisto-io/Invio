@@ -22,6 +22,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
   -- Optional default invoice number pattern (tokens: {YYYY} {YY} {MM} {DD} {DATE} {RAND4})
   ('invoiceNumberPattern', ''),
   ('invoiceNumberingEnabled', 'true'),
+  ('allowProtectedInvoiceChanges', 'false'),
   ('embedXmlInHtml', 'false'),
   -- Optional PEPPOL endpoint configuration (leave empty if not applicable)
   ('peppolSellerEndpointId', ''),
@@ -76,6 +77,7 @@ CREATE TABLE invoice_items (
   invoice_id TEXT REFERENCES invoices(id) ON DELETE CASCADE,
   description TEXT NOT NULL,
   quantity NUMERIC NOT NULL,
+  unit TEXT,
   unit_price NUMERIC NOT NULL,
   line_total NUMERIC NOT NULL,
   notes TEXT,
@@ -178,6 +180,7 @@ CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 
 -- Link invoice items to products (optional reference)
 ALTER TABLE invoice_items ADD COLUMN product_id TEXT REFERENCES products(id);
+ALTER TABLE invoice_items ADD COLUMN unit TEXT;
 
 -- Add 'voided' to invoice status CHECK constraint.
 -- SQLite CHECK constraints are immutable, but adding 'voided' via a direct
@@ -198,9 +201,16 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
   is_active INTEGER NOT NULL DEFAULT 1,
+  two_factor_secret TEXT,
+  two_factor_enabled INTEGER NOT NULL DEFAULT 0,
+  two_factor_recovery_codes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE users ADD COLUMN two_factor_secret TEXT;
+ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN two_factor_recovery_codes TEXT;
 
 CREATE TABLE IF NOT EXISTS user_permissions (
   id TEXT PRIMARY KEY,
@@ -211,6 +221,9 @@ CREATE TABLE IF NOT EXISTS user_permissions (
   UNIQUE(user_id, resource, action)
 );
 
+ALTER TABLE users ADD COLUMN oidc_subject TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_oidc_subject ON users(oidc_subject) WHERE oidc_subject IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(is_active);
 CREATE INDEX IF NOT EXISTS idx_user_permissions_user ON user_permissions(user_id);

@@ -1,15 +1,15 @@
 import { DB } from "sqlite";
-import { getEnv, isDemoMode, getAdminCredentials } from "../utils/env.ts";
+import { getAdminCredentials, getEnv, isDemoMode } from "../utils/env.ts";
 import { hashPassword } from "../utils/password.ts";
 import { generateUUID } from "../utils/uuid.ts";
 import { RESOURCE_ACTIONS } from "../types/index.ts";
-import type { Resource, Action } from "../types/index.ts";
+import type { Action, Resource } from "../types/index.ts";
 
 let db: DB;
 
-// 
+//
 //  Path helpers
-// 
+//
 
 function resolvePath(p: string): string {
   return p.startsWith("/") ? p : p;
@@ -22,16 +22,24 @@ function simpleDirname(p: string): string {
 
 function ensureDir(dir: string): void {
   if (dir && dir !== "." && dir !== "/") {
-    try { Deno.mkdirSync(dir, { recursive: true }); } catch { /* ok */ }
+    try {
+      Deno.mkdirSync(dir, { recursive: true });
+    } catch {
+      /* ok */
+    }
   }
 }
 
-// 
+//
 //  Version & backup helpers
-// 
+//
 
 function readAppVersion(): string {
-  try { return Deno.readTextFileSync("./VERSION").trim(); } catch { return "unknown"; }
+  try {
+    return Deno.readTextFileSync("./VERSION").trim();
+  } catch {
+    return "unknown";
+  }
 }
 
 function getStoredSchemaVersion(database: DB): string | null {
@@ -51,10 +59,15 @@ function storeSchemaVersion(database: DB): void {
       "INSERT OR REPLACE INTO settings (key, value) VALUES ('_schema_version', ?)",
       [readAppVersion()],
     );
-  } catch { /* ignore */ }
+  } catch {
+    /* ignore */
+  }
 }
 
-function createDatabaseBackup(dbPath: string, fromVersion?: string | null): void {
+function createDatabaseBackup(
+  dbPath: string,
+  fromVersion?: string | null,
+): void {
   const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const suffix = fromVersion ? `_v${fromVersion}` : "";
   const backupPath = dbPath.replace(/\.db$/, "") + `_backup${suffix}_${ts}.db`;
@@ -74,13 +87,17 @@ function backupIfVersionChanged(database: DB, dbPath: string): void {
       createDatabaseBackup(dbPath, stored);
     }
   } catch {
-    try { createDatabaseBackup(dbPath); } catch { /* ignore */ }
+    try {
+      createDatabaseBackup(dbPath);
+    } catch {
+      /* ignore */
+    }
   }
 }
 
-// 
+//
 //  Migration helpers
-// 
+//
 
 /** Parse a .sql file into executable statements (strip comments, split on `;`). */
 function parseSqlStatements(sql: string): string[] {
@@ -119,8 +136,9 @@ function addColumnIfMissing(
   column: string,
   definition: string,
 ): void {
-  const cols = (database.query(`PRAGMA table_info(${table})`) as unknown[][])
-    .map((r) => String(r[1]));
+  const cols = (
+    database.query(`PRAGMA table_info(${table})`) as unknown[][]
+  ).map((r) => String(r[1]));
   if (cols.includes(column)) return;
   try {
     database.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
@@ -133,24 +151,122 @@ function addColumnIfMissing(
   }
 }
 
-// 
+//
 //  Schema upgrades
-// 
+//
 
 function ensureCustomerColumns(database: DB): void {
   addColumnIfMissing(database, "customers", "contact_name", "TEXT");
   addColumnIfMissing(database, "customers", "country_code", "TEXT");
   addColumnIfMissing(database, "customers", "city", "TEXT");
   addColumnIfMissing(database, "customers", "postal_code", "TEXT");
+  addColumnIfMissing(database, "customers", "customer_number", "INTEGER");
+}
+
+/** Assign a permanent sequential customer_number (by creation order) to any customer missing one. */
+function backfillCustomerNumbers(database: DB): void {
+  const rows = database.query(
+    "SELECT id FROM customers WHERE customer_number IS NULL ORDER BY created_at ASC, id ASC",
+  ) as unknown[][];
+  if (rows.length === 0) return;
+
+  const maxRow = database.query(
+    "SELECT COALESCE(MAX(customer_number), 0) FROM customers",
+  ) as unknown[][];
+  let next = Number((maxRow[0] as unknown[])[0]) + 1;
+
+  for (const row of rows) {
+    database.query("UPDATE customers SET customer_number = ? WHERE id = ?", [
+      next,
+      String(row[0]),
+    ]);
+    next++;
+  }
+
+  console.log(
+    `  Backfilled customer_number for ${rows.length} existing customer(s).`,
+  );
 }
 
 function ensureInvoiceColumns(database: DB): void {
-  addColumnIfMissing(database, "invoices", "prices_include_tax", "BOOLEAN DEFAULT 0");
-  addColumnIfMissing(database, "invoices", "rounding_mode", "TEXT DEFAULT 'line'");
+  addColumnIfMissing(
+    database,
+    "invoices",
+    "prices_include_tax",
+    "BOOLEAN DEFAULT 0",
+  );
+  addColumnIfMissing(
+    database,
+    "invoices",
+    "rounding_mode",
+    "TEXT DEFAULT 'line'",
+  );
 }
 
 function ensureInvoiceItemColumns(database: DB): void {
-  addColumnIfMissing(database, "invoice_items", "product_id", "TEXT REFERENCES products(id)");
+  addColumnIfMissing(database, "invoice_items", "unit", "TEXT");
+  addColumnIfMissing(
+    database,
+    "invoice_items",
+    "product_id",
+    "TEXT REFERENCES products(id)",
+  );
+}
+
+function ensureUserColumns(database: DB): void {
+  addColumnIfMissing(database, "users", "two_factor_secret", "TEXT");
+  addColumnIfMissing(
+    database,
+    "users",
+    "two_factor_enabled",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
+  addColumnIfMissing(database, "users", "two_factor_recovery_codes", "TEXT");
+  addColumnIfMissing(database, "users", "oidc_subject", "TEXT");
+}
+
+function ensureStatusHistoryTable(database: DB): void {
+  database.execute(`
+    CREATE TABLE IF NOT EXISTS invoice_status_history (
+      id TEXT PRIMARY KEY,
+      invoice_id TEXT NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      changed_at TEXT NOT NULL,
+      payment_method TEXT,
+      note TEXT
+    )
+  `);
+  database.execute(
+    `CREATE INDEX IF NOT EXISTS idx_invoice_status_history_invoice_id
+     ON invoice_status_history(invoice_id, changed_at)`,
+  );
+  backfillStatusHistory(database);
+}
+
+function backfillStatusHistory(database: DB): void {
+  // Insert one history entry per invoice that has no history yet.
+  // Uses the invoice's current status and updated_at as the best available timestamp.
+  const rows = database.query(
+    `SELECT id, status, updated_at FROM invoices
+     WHERE id NOT IN (SELECT DISTINCT invoice_id FROM invoice_status_history)`,
+  ) as unknown[][];
+
+  if (rows.length === 0) return;
+
+  for (const row of rows) {
+    const invoiceId = String(row[0]);
+    const status = String(row[1]);
+    const changedAt = row[2] ? String(row[2]) : new Date().toISOString();
+    database.query(
+      `INSERT INTO invoice_status_history (id, invoice_id, status, changed_at, payment_method, note)
+       VALUES (?, ?, ?, ?, NULL, NULL)`,
+      [crypto.randomUUID(), invoiceId, status, changedAt],
+    );
+  }
+
+  console.log(
+    `  Backfilled status history for ${rows.length} existing invoice(s).`,
+  );
 }
 
 function ensureTaxTables(database: DB): void {
@@ -227,7 +343,9 @@ function seedProductDefaults(database: DB): void {
         "INSERT OR IGNORE INTO product_categories (id, code, name, sort_order, is_builtin) VALUES (?, ?, ?, ?, 1)",
         [c.code, c.code, c.name, c.sort],
       );
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 
   const units = [
@@ -244,7 +362,9 @@ function seedProductDefaults(database: DB): void {
         "INSERT OR IGNORE INTO product_units (id, code, name, sort_order, is_builtin) VALUES (?, ?, ?, ?, 1)",
         [u.code, u.code, u.name, u.sort],
       );
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }
 }
 
@@ -260,9 +380,16 @@ function migrateInvoicesForVoided(database: DB): void {
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='invoices'",
   );
   const createSql = checkSql.length > 0 ? String(checkSql[0][0]) : "";
-  if (!createSql || (createSql.includes("voided") && createSql.includes("complete"))) return;
+  if (
+    !createSql ||
+    (createSql.includes("voided") && createSql.includes("complete"))
+  ) {
+    return;
+  }
 
-  console.log("Migrating invoices table to support 'voided' and 'complete' statuses");
+  console.log(
+    "Migrating invoices table to support 'voided' and 'complete' statuses",
+  );
 
   const itemCountBefore = Number(
     (database.query("SELECT COUNT(*) FROM invoice_items") as unknown[][])[0][0],
@@ -298,21 +425,37 @@ function migrateInvoicesForVoided(database: DB): void {
       )
     `);
 
-    const existingCols = (database.query("PRAGMA table_info(invoices)") as unknown[][]).map((r) => String(r[1]));
-    const newCols = (database.query("PRAGMA table_info(invoices_new)") as unknown[][]).map((r) => String(r[1]));
+    const existingCols = (
+      database.query("PRAGMA table_info(invoices)") as unknown[][]
+    ).map((r) => String(r[1]));
+    const newCols = (
+      database.query("PRAGMA table_info(invoices_new)") as unknown[][]
+    ).map((r) => String(r[1]));
     const colList = existingCols.filter((c) => newCols.includes(c)).join(", ");
 
-    database.execute(`INSERT INTO invoices_new (${colList}) SELECT ${colList} FROM invoices`);
+    database.execute(
+      `INSERT INTO invoices_new (${colList}) SELECT ${colList} FROM invoices`,
+    );
     database.execute("DROP TABLE invoices");
     database.execute("ALTER TABLE invoices_new RENAME TO invoices");
 
-    database.execute("CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(invoice_number)");
-    database.execute("CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id)");
-    database.execute("CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)");
-    database.execute("CREATE INDEX IF NOT EXISTS idx_invoices_share_token ON invoices(share_token)");
+    database.execute(
+      "CREATE INDEX IF NOT EXISTS idx_invoices_number ON invoices(invoice_number)",
+    );
+    database.execute(
+      "CREATE INDEX IF NOT EXISTS idx_invoices_customer ON invoices(customer_id)",
+    );
+    database.execute(
+      "CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)",
+    );
+    database.execute(
+      "CREATE INDEX IF NOT EXISTS idx_invoices_share_token ON invoices(share_token)",
+    );
 
     database.execute("COMMIT");
-    console.log(" Migrated invoices table to support 'voided' and 'complete' statuses");
+    console.log(
+      " Migrated invoices table to support 'voided' and 'complete' statuses",
+    );
   } catch (migErr) {
     database.execute("ROLLBACK");
     throw migErr;
@@ -327,8 +470,8 @@ function migrateInvoicesForVoided(database: DB): void {
   if (itemCountAfter !== itemCountBefore) {
     console.error(
       `  WARNING: invoice_items row count changed during migration! ` +
-      `Before: ${itemCountBefore}, After: ${itemCountAfter}. ` +
-      `Check your database backup for recovery.`,
+        `Before: ${itemCountBefore}, After: ${itemCountAfter}. ` +
+        `Check your database backup for recovery.`,
     );
   } else if (itemCountBefore > 0) {
     console.log(`   Verified: ${itemCountBefore} invoice items preserved`);
@@ -338,24 +481,29 @@ function migrateInvoicesForVoided(database: DB): void {
 function ensureSchemaUpgrades(database: DB): void {
   try {
     ensureCustomerColumns(database);
+    backfillCustomerNumbers(database);
     ensureInvoiceColumns(database);
     ensureTaxTables(database);
     ensureProductTables(database);
     seedProductDefaults(database);
     migrateInvoicesForVoided(database);
     ensureInvoiceItemColumns(database);
+    ensureUserColumns(database);
+    ensureStatusHistoryTable(database);
   } catch (e) {
     console.warn("Schema upgrade check failed:", e);
   }
 }
 
-// 
+//
 //  Built-in templates
-// 
+//
 
 const BUILTIN_TEMPLATES = [
   { id: "professional-modern", name: "Professional Modern", isDefault: false },
   { id: "minimalist-clean", name: "Minimalist Clean", isDefault: true },
+  { id: "nova", name: "Nova", isDefault: false },
+  { id: "slate", name: "Slate", isDefault: false },
 ] as const;
 
 function loadTemplateHtml(id: string): string {
@@ -372,7 +520,10 @@ function insertBuiltinTemplates(database: DB): void {
   for (const t of BUILTIN_TEMPLATES) {
     const html = loadTemplateHtml(t.id);
     try {
-      const existing = database.query("SELECT html FROM templates WHERE id = ?", [t.id]);
+      const existing = database.query(
+        "SELECT html FROM templates WHERE id = ?",
+        [t.id],
+      );
       if (existing.length === 0) {
         database.query(
           "INSERT INTO templates (id, name, html, is_default, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -404,18 +555,22 @@ function ensureTemplateDefaults(database: DB): void {
 
     database.query("UPDATE templates SET is_default = 0");
 
-    const preferred = ids.includes("minimalist-clean") ? "minimalist-clean" : ids[0];
+    const preferred = ids.includes("minimalist-clean")
+      ? "minimalist-clean"
+      : ids[0];
     if (preferred) {
-      database.query("UPDATE templates SET is_default = 1 WHERE id = ?", [preferred]);
+      database.query("UPDATE templates SET is_default = 1 WHERE id = ?", [
+        preferred,
+      ]);
     }
   } catch (e) {
     console.error("Failed to ensure template defaults:", e);
   }
 }
 
-// 
+//
 //  Admin seeding
-// 
+//
 
 async function seedAdminUser(database: DB): Promise<void> {
   try {
@@ -433,7 +588,12 @@ async function seedAdminUser(database: DB): Promise<void> {
       [id, username, username, passwordHash, now, now],
     );
 
-    for (const [resource, actions] of Object.entries(RESOURCE_ACTIONS) as [Resource, readonly Action[]][]) {
+    for (
+      const [resource, actions] of Object.entries(RESOURCE_ACTIONS) as [
+        Resource,
+        readonly Action[],
+      ][]
+    ) {
       for (const action of actions) {
         database.query(
           "INSERT INTO user_permissions (id, user_id, resource, action) VALUES (?, ?, ?, ?)",
@@ -449,9 +609,9 @@ async function seedAdminUser(database: DB): Promise<void> {
   }
 }
 
-// 
+//
 //  Public API: init / reset / accessors
-// 
+//
 
 export async function initDatabase(): Promise<void> {
   const dbPath = resolvePath(getEnv("DATABASE_PATH", "./invio.db")!);
@@ -459,7 +619,12 @@ export async function initDatabase(): Promise<void> {
 
   // Detect existing database (upgrade vs fresh install)
   let dbFileExisted = false;
-  try { Deno.statSync(dbPath); dbFileExisted = true; } catch { /* new install */ }
+  try {
+    Deno.statSync(dbPath);
+    dbFileExisted = true;
+  } catch {
+    /* new install */
+  }
 
   db = new DB(dbPath);
 
@@ -485,36 +650,79 @@ export async function resetDatabaseFromDemo(): Promise<void> {
   const demoDb = getEnv("DEMO_DB_PATH");
   const activePath = resolvePath(getEnv("DATABASE_PATH", "./invio.db")!);
   if (!demoDb) {
-    console.warn("DEMO_MODE is true but DEMO_DB_PATH is not set; skipping reset.");
-    return;
+    throw new Error("DEMO_MODE is true but DEMO_DB_PATH is not set.");
   }
-
-  try { closeDatabase(); } catch { /* ignore */ }
+  const demoPath = resolvePath(demoDb);
+  const tempPath =
+    `${activePath}.demo-reset-${Date.now()}-${crypto.randomUUID()}.tmp`;
 
   try {
-    ensureDir(simpleDirname(activePath));
-    try { Deno.removeSync(activePath); } catch { /* ok if missing */ }
-    Deno.copyFileSync(resolvePath(demoDb), activePath);
-    console.log("  Demo database reset from DEMO_DB_PATH.");
-  } catch (e) {
-    console.error("Failed to reset demo database:", e);
+    closeDatabase();
+  } catch (error) {
+    throw new Error(
+      `Failed to close current database before demo reset: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 
-  await initDatabase();
+  let resetError: unknown = undefined;
+  try {
+    Deno.statSync(demoPath);
+    ensureDir(simpleDirname(activePath));
+
+    Deno.copyFileSync(demoPath, tempPath);
+    try {
+      Deno.renameSync(tempPath, activePath);
+    } catch {
+      try {
+        Deno.removeSync(activePath);
+      } catch (error) {
+        if (!(error instanceof Deno.errors.NotFound)) {
+          throw error;
+        }
+      }
+      Deno.renameSync(tempPath, activePath);
+    }
+    console.log("  Demo database reset from DEMO_DB_PATH.");
+  } catch (e) {
+    resetError = e;
+  } finally {
+    try {
+      Deno.removeSync(tempPath);
+    } catch (error) {
+      if (!(error instanceof Deno.errors.NotFound)) {
+        console.warn("Could not remove temporary demo reset file:", error);
+      }
+    }
+    await initDatabase();
+  }
+
+  if (resetError) {
+    throw new Error(
+      `Failed to reset demo database: ${
+        resetError instanceof Error ? resetError.message : String(resetError)
+      }`,
+    );
+  }
 }
 
 export function getDatabase(): DB {
-  if (!db) throw new Error("Database not initialized. Call initDatabase() first.");
+  if (!db) {
+    throw new Error("Database not initialized. Call initDatabase() first.");
+  }
   return db;
 }
 
 export function closeDatabase(): void {
-  if (db) db.close();
+  if (!db) return;
+  db.close();
+  db = undefined;
 }
 
-// 
+//
 //  Invoice numbering
-// 
+//
 
 function cryptoRandom(len: number): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -535,31 +743,57 @@ function getNumberingSettings(): {
   pattern?: string;
   enabled: boolean;
 } {
-  const cfg = { prefix: "INV", includeYear: true, pad: 3, pattern: undefined as string | undefined, enabled: true };
+  const cfg = {
+    prefix: "INV",
+    includeYear: true,
+    pad: 3,
+    pattern: undefined as string | undefined,
+    enabled: true,
+  };
   try {
     const rows = db.query(
       "SELECT key, value FROM settings WHERE key IN ('invoicePrefix','invoiceIncludeYear','invoiceNumberPadding','invoiceNumberPattern')",
     );
     const m = new Map<string, string>();
-    for (const r of rows) { const [k, v] = r as [string, string]; m.set(k, v); }
+    for (const r of rows) {
+      const [k, v] = r as [string, string];
+      m.set(k, v);
+    }
 
     cfg.prefix = (m.get("invoicePrefix") || cfg.prefix).trim() || cfg.prefix;
-    cfg.includeYear = (m.get("invoiceIncludeYear") || "true").toLowerCase() !== "false";
+    cfg.includeYear =
+      (m.get("invoiceIncludeYear") || "true").toLowerCase() !== "false";
     const p = parseInt(m.get("invoiceNumberPadding") || String(cfg.pad), 10);
     if (!Number.isNaN(p) && p >= 2 && p <= 8) cfg.pad = p;
     cfg.pattern = (m.get("invoiceNumberPattern") || "").trim() || undefined;
 
     try {
-      const raw = db.query("SELECT value FROM settings WHERE key = 'invoiceNumberingEnabled' LIMIT 1");
-      if (raw.length > 0) cfg.enabled = String(raw[0][0]).toLowerCase() !== "false";
-    } catch { /* ignore */ }
-  } catch { /* use defaults */ }
+      const raw = db.query(
+        "SELECT value FROM settings WHERE key = 'invoiceNumberingEnabled' LIMIT 1",
+      );
+      if (raw.length > 0) {
+        cfg.enabled = String(raw[0][0]).toLowerCase() !== "false";
+      }
+    } catch {
+      /* ignore */
+    }
+  } catch {
+    /* use defaults */
+  }
   return cfg;
 }
 
-/** Find the highest existing sequential suffix matching `likePrefix%`. */
-function findMaxSequence(likePrefix: string): number {
-  const rows = db.query("SELECT invoice_number FROM invoices WHERE invoice_number LIKE ?", [likePrefix + "%"]);
+/** Find the highest existing sequential suffix matching `likePrefix%`, optionally scoped to a single customer. */
+function findMaxSequence(likePrefix: string, customerId?: string): number {
+  const rows = customerId
+    ? db.query(
+      "SELECT invoice_number FROM invoices WHERE invoice_number LIKE ? AND customer_id = ?",
+      [likePrefix + "%", customerId],
+    )
+    : db.query(
+      "SELECT invoice_number FROM invoices WHERE invoice_number LIKE ?",
+      [likePrefix + "%"],
+    );
   const escaped = likePrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^${escaped}(\\d+).*?$`);
   let max = 0;
@@ -568,6 +802,22 @@ function findMaxSequence(likePrefix: string): number {
     if (m) max = Math.max(max, parseInt(m[1], 10) || 0);
   }
   return max;
+}
+
+/** Look up a customer's permanent sequential customer_number, if any. */
+function getCustomerNumber(customerId?: string): number | null {
+  if (!customerId) return null;
+  try {
+    const rows = db.query(
+      "SELECT customer_number FROM customers WHERE id = ?",
+      [customerId],
+    ) as unknown[][];
+    if (rows.length === 0) return null;
+    const v = rows[0][0];
+    return v == null ? null : Number(v);
+  } catch {
+    return null;
+  }
 }
 
 /** Expand date/random tokens in an invoice-number pattern. */
@@ -586,28 +836,57 @@ function expandPatternTokens(pattern: string): string {
     .replace(/\{RAND4\}/g, () => cryptoRandom(4));
 }
 
-export function getNextInvoiceNumber(): string {
+export function getNextInvoiceNumber(customerId?: string): string {
   const cfg = getNumberingSettings();
 
   // Advanced pattern mode (when enabled and configured)
   if (cfg.pattern && cfg.enabled) {
     const expanded = expandPatternTokens(cfg.pattern);
-    if (!/\{SEQ\}/.test(cfg.pattern)) return expanded;
+    const hasSeq = /\{SEQ\}/.test(cfg.pattern);
+    const hasClientSeq = /\{CSEQ\}/.test(cfg.pattern);
+    const hasCustomerNum = /\{CNUM\}/.test(cfg.pattern);
+    if (!hasSeq && !hasClientSeq && !hasCustomerNum) return expanded;
 
-    const prefix = expanded.split("{SEQ}")[0];
-    const next = findMaxSequence(prefix) + 1;
-    return expanded.replace(/\{SEQ\}/g, String(next).padStart(3, "0"));
+    let result = expanded;
+    // {CNUM} must resolve first: {SEQ}/{CSEQ} scan existing invoice_number
+    // values using everything before them as a LIKE prefix, so that prefix
+    // has to be fully literal (no leftover {CNUM} placeholder) or it will
+    // never match a real stored invoice number and the counter always
+    // reads as empty (stuck at 1).
+    if (hasCustomerNum) {
+      // {CNUM}: the customer's own permanent sequential number
+      const custNum = getCustomerNumber(customerId);
+      result = result.replace(
+        /\{CNUM\}/g,
+        custNum != null ? String(custNum).padStart(3, "0") : "",
+      );
+    }
+    if (hasSeq) {
+      // {SEQ}: global counter, shared across all customers
+      const prefix = result.split("{SEQ}")[0];
+      const next = findMaxSequence(prefix) + 1;
+      result = result.replace(/\{SEQ\}/g, String(next).padStart(3, "0"));
+    }
+    if (hasClientSeq) {
+      // {CSEQ}: counter scoped to this customer's own invoices
+      const prefix = result.split("{CSEQ}")[0];
+      const next = findMaxSequence(prefix, customerId) + 1;
+      result = result.replace(/\{CSEQ\}/g, String(next).padStart(3, "0"));
+    }
+    return result;
   }
 
-  // Legacy mode: PREFIX-YYYY-NNN
-  const base = cfg.includeYear ? `${cfg.prefix}-${new Date().getFullYear()}-` : `${cfg.prefix}-`;
+  // Legacy mode: PREFIX-YYYY-NNN (global, no per-client variant)
+  const base = cfg.includeYear
+    ? `${cfg.prefix}-${new Date().getFullYear()}-`
+    : `${cfg.prefix}-`;
   const next = findMaxSequence(base) + 1;
   return `${base}${String(next).padStart(cfg.pad, "0")}`;
 }
 
-// 
+//
 //  Invoice total calculations
-// 
+//
 
 export interface CalculatedTotals {
   subtotal: number;
@@ -628,11 +907,15 @@ export function calculateInvoiceTotals(
 ): CalculatedTotals {
   const rate = Math.max(0, Number(taxRate) || 0) / 100;
 
-  const lineGrosses = items.map((it) => (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0));
+  const lineGrosses = items.map(
+    (it) => (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0),
+  );
   const subtotal = lineGrosses.reduce((a, b) => a + b, 0);
 
   let finalDiscount = Number(discountAmount) || 0;
-  if (discountPercentage > 0) finalDiscount = subtotal * (discountPercentage / 100);
+  if (discountPercentage > 0) {
+    finalDiscount = subtotal * (discountPercentage / 100);
+  }
   finalDiscount = Math.min(Math.max(finalDiscount, 0), subtotal);
 
   let taxAmount = 0;
@@ -642,15 +925,21 @@ export function calculateInvoiceTotals(
     // Proportional per-line discount, rounded per line
     let distributed = 0;
     const lineDiscounts = lineGrosses.map((g, idx) => {
-      if (idx === lineGrosses.length - 1) return r2(finalDiscount - distributed);
+      if (idx === lineGrosses.length - 1) {
+        return r2(finalDiscount - distributed);
+      }
       const d = r2(finalDiscount * (g / subtotal));
       distributed += d;
       return d;
     });
 
-    let sumTax = 0, sumTotal = 0;
+    let sumTax = 0,
+      sumTotal = 0;
     for (let i = 0; i < lineGrosses.length; i++) {
-      const afterDiscount = Math.max(0, lineGrosses[i] - (lineDiscounts[i] || 0));
+      const afterDiscount = Math.max(
+        0,
+        lineGrosses[i] - (lineDiscounts[i] || 0),
+      );
       if (pricesIncludeTax) {
         const net = rate > 0 ? afterDiscount / (1 + rate) : afterDiscount;
         sumTax += r2(afterDiscount - net);
@@ -676,5 +965,10 @@ export function calculateInvoiceTotals(
     }
   }
 
-  return { subtotal: r2(subtotal), discountAmount: r2(finalDiscount), taxAmount, total };
+  return {
+    subtotal: r2(subtotal),
+    discountAmount: r2(finalDiscount),
+    taxAmount,
+    total,
+  };
 }

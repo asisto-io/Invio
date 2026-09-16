@@ -6,6 +6,7 @@
 
   let t = getContext("i18n") as (key: string) => string;
   let numberFormat = $derived(data.localization?.numberFormat || "comma");
+  let dateLocale = $derived(data.localization?.locale || "en");
   let user = $derived(data.user);
   let canCreate = $derived(user?.isAdmin || user?.permissions?.some((p) => p.resource === "invoices" && p.action === "create"));
   let canViewCustomers = $derived(user?.isAdmin || user?.permissions?.some((p) => p.resource === "customers" && p.action === "read"));
@@ -84,6 +85,11 @@
       return sortDirection === "asc" ? result : -result;
     }),
   );
+
+  // Show "Paid with" only when at least one visible (filtered) invoice has a payment method.
+  // This hides the column automatically when filtering to statuses that can never carry one
+  // (e.g. Draft, Sent, Voided) — the column would otherwise appear with all cells empty.
+  let showPaidWith = $derived(sortedFiltered.some((i: any) => i.paidWith));
 </script>
 
 <div class="mb-4 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
@@ -152,6 +158,11 @@
               {t("Issue Date")}{sortMarker("issueDate")}
             </button>
           </th>
+          {#if showPaidWith}
+            <th class="hidden sm:table-cell">
+              {t("Paid with")}
+            </th>
+          {/if}
           <th class="hidden text-right md:table-cell">
             <button type="button" class="btn btn-ghost btn-xs px-1 normal-case" onclick={() => handleSort("updatedAt")}>
               {t("Updated")}{sortMarker("updatedAt")}
@@ -160,13 +171,13 @@
         </tr>
       </thead>
       <tbody>
-        {#each sortedFiltered as inv}
+        {#each sortedFiltered as inv (inv.id)}
           <tr class="hover">
             <td class="font-medium hover:underline">
               <a href={`/invoices/${inv.id}`}>{inv.invoiceNumber}</a>
               <div class="text-xs opacity-70 sm:hidden">
                 {#if inv.issueDate}
-                  {new Date(inv.issueDate).toLocaleDateString(numberFormat === "period" ? "de-DE" : "en-US", { year: "numeric", month: "short", day: "numeric" })}
+                  {new Date(inv.issueDate).toLocaleDateString(dateLocale, { year: "numeric", month: "short", day: "numeric" })}
                 {/if}
               </div>
             </td>
@@ -195,19 +206,24 @@
             </td>
             <td class="hidden text-sm tabular-nums sm:table-cell">
               {#if inv.issueDate}
-                {new Date(inv.issueDate).toLocaleDateString(numberFormat === "period" ? "de-DE" : "en-US", { year: "numeric", month: "short", day: "numeric" })}
+                {new Date(inv.issueDate).toLocaleDateString(dateLocale, { year: "numeric", month: "short", day: "numeric" })}
               {/if}
             </td>
+            {#if showPaidWith}
+              <td class="hidden text-sm sm:table-cell">
+                {(inv as any).paidWith || ""}
+              </td>
+            {/if}
             <td class="hidden text-right text-sm tabular-nums opacity-70 md:table-cell">
               {#if inv.updatedAt}
-                {new Date(inv.updatedAt).toLocaleDateString(numberFormat === "period" ? "de-DE" : "en-US", { year: "numeric", month: "short", day: "numeric" })}
+                {new Date(inv.updatedAt).toLocaleDateString(dateLocale, { year: "numeric", month: "short", day: "numeric" })}
               {/if}
             </td>
           </tr>
         {/each}
         {#if sortedFiltered.length === 0}
           <tr>
-            <td colspan="6" class="py-8 text-center opacity-50">{t("No invoices match this filter")}</td>
+            <td colspan="99" class="py-8 text-center opacity-50">{t("No invoices match this filter")}</td>
           </tr>
         {/if}
       </tbody>
