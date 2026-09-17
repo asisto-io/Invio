@@ -11,7 +11,6 @@ export interface Customer {
   taxId?: string;
   reference?: string; // BuyerReference or order ref
   createdAt: Date;
-  customerNumber?: number; // permanent sequential number, assigned at creation
 }
 
 export interface Product {
@@ -68,7 +67,6 @@ export interface InvoiceItem {
   productId?: string;
   description: string;
   quantity: number;
-  unit?: string;
   unitPrice: number;
   lineTotal: number;
   notes?: string;
@@ -170,7 +168,7 @@ export const RESOURCES = [
   "users",
 ] as const;
 
-export type Resource = (typeof RESOURCES)[number];
+export type Resource = typeof RESOURCES[number];
 
 export const ACTIONS = [
   "read",
@@ -183,7 +181,7 @@ export const ACTIONS = [
   "install",
 ] as const;
 
-export type Action = (typeof ACTIONS)[number];
+export type Action = typeof ACTIONS[number];
 
 /** Defines which actions are meaningful for each resource */
 export const RESOURCE_ACTIONS: Record<Resource, readonly Action[]> = {
@@ -208,7 +206,6 @@ export interface User {
   displayName?: string;
   isAdmin: boolean;
   isActive: boolean;
-  twoFactorEnabled: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -261,10 +258,8 @@ export interface CreateInvoiceRequest {
 
   // Items
   items: {
-    productId?: string;
     description: string;
     quantity: number;
-    unit?: string;
     unitPrice: number;
     notes?: string;
     // Optional per-line taxes (advanced). If omitted, falls back to invoice-level taxRate
@@ -280,7 +275,6 @@ export interface CreateInvoiceRequest {
 
 export interface UpdateInvoiceRequest extends Partial<CreateInvoiceRequest> {
   id: string;
-  paymentMethod?: string; // optionally record payment method when status → 'paid'
 }
 
 export interface CreateCustomerRequest {
@@ -305,21 +299,11 @@ export interface CreateProductRequest {
   taxDefinitionId?: string;
 }
 
-export interface StatusHistoryEntry {
-  id: string;
-  invoiceId: string;
-  status: string;
-  changedAt: Date;
-  paymentMethod?: string;
-  note?: string;
-}
-
 export interface InvoiceWithDetails extends Invoice {
   customer: Customer;
   items: InvoiceItem[];
   attachments?: InvoiceAttachment[];
   taxes?: InvoiceTax[];
-  statusHistory?: StatusHistoryEntry[];
 }
 
 // Template rendering context
@@ -359,12 +343,10 @@ export interface TemplateContext {
   items: Array<{
     description: string;
     quantity: number;
-    unit?: string;
     unitPrice: string;
     lineTotal: string;
     notes?: string;
   }>;
-  hasItemUnits?: boolean;
 
   // Totals
   subtotal: string;

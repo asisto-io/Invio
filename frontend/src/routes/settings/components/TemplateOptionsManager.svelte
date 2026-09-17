@@ -3,7 +3,7 @@
   import { Upload, Link, Trash2, RefreshCw } from "lucide-svelte";
   import { invalidateAll } from "$app/navigation";
 
-  let { templates = [] } = $props();
+  let { templates = [], demoMode } = $props();
   let t = getContext("i18n") as (key: string, params?: any) => string;
 
   // File Upload
@@ -114,7 +114,7 @@
       </div>
     {:else}
       <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
-        {#each templates as tmpl (tmpl.id)}
+        {#each templates as tmpl}
           <div class="card bg-base-200 border-base-300 border">
             <div class="card-body p-4">
               <h4 class="card-title text-base">{tmpl.name}</h4>
@@ -123,9 +123,9 @@
               </p>
               <div class="card-actions mt-4 justify-end">
                 {#if tmpl.updatable && tmpl.templateType === "remote"}
-                  <button class="btn btn-sm btn-outline" onclick={() => handleUpdate(tmpl.id)} title={t("Update")}><RefreshCw size={16} /></button>
+                  <button class="btn btn-sm btn-outline" disabled={demoMode} onclick={() => handleUpdate(tmpl.id)} title={t("Update")}><RefreshCw size={16} /></button>
                 {/if}
-                <button class="btn btn-sm btn-error btn-outline" disabled={tmpl.isDefault} onclick={() => handleDelete(tmpl.id)} title={t("Delete")}><Trash2 size={16} /></button>
+                <button class="btn btn-sm btn-error btn-outline" disabled={demoMode || tmpl.isDefault} onclick={() => handleDelete(tmpl.id)} title={t("Delete")}><Trash2 size={16} /></button>
               </div>
             </div>
           </div>
@@ -144,11 +144,17 @@
       </h4>
       <div class="form-control">
         <label class="label"
-          ><span class="label-text">{t("Select .zip archive")}</span><input bind:this={fileInput} type="file" accept=".zip" class="file-input file-input-bordered mt-2 w-full" /></label
+          ><span class="label-text">{t("Select .zip archive")}</span><input
+            bind:this={fileInput}
+            type="file"
+            accept=".zip"
+            class="file-input file-input-bordered mt-2 w-full"
+            disabled={demoMode}
+          /></label
         >
         {#if uploadErr}<span class="label-text-alt text-error mt-1">{uploadErr}</span>{/if}
       </div>
-      <button type="submit" class="btn btn-primary mt-4 w-full" disabled={uploadBusy}>
+      <button type="submit" class="btn btn-primary mt-4 w-full" disabled={uploadBusy || demoMode}>
         {uploadBusy ? t("Uploading...") : t("Upload")}
       </button>
     </form>
@@ -159,10 +165,12 @@
         {t("Install from URL")}
       </h4>
       <div class="form-control">
-        <label class="label"><span class="label-text">{t("Manifest URL")}</span><input type="url" class="input input-bordered mt-2 w-full" bind:value={installUrl} placeholder="https://..." /></label>
+        <label class="label"
+          ><span class="label-text">{t("Manifest URL")}</span><input type="url" class="input input-bordered mt-2 w-full" bind:value={installUrl} placeholder="https://..." disabled={demoMode} /></label
+        >
         {#if installErr}<span class="label-text-alt text-error mt-1">{installErr}</span>{/if}
       </div>
-      <button type="submit" class="btn btn-primary mt-4 w-full" disabled={installBusy}>
+      <button type="submit" class="btn btn-primary mt-4 w-full" disabled={installBusy || demoMode}>
         {installBusy ? t("Installing...") : t("Install")}
       </button>
     </form>

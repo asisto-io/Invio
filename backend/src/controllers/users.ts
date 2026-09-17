@@ -2,13 +2,13 @@ import { getDatabase } from "../database/init.ts";
 import { generateUUID } from "../utils/uuid.ts";
 import { hashPassword, verifyPassword } from "../utils/password.ts";
 import type {
-  Action,
-  CreateUserRequest,
-  Permission,
-  Resource,
-  UpdateUserRequest,
   User,
   UserWithPermissions,
+  Permission,
+  CreateUserRequest,
+  UpdateUserRequest,
+  Resource,
+  Action,
 } from "../types/index.ts";
 
 // ---- Helpers ----
@@ -21,9 +21,8 @@ function rowToUser(row: unknown[]): User {
     displayName: row[3] ? String(row[3]) : undefined,
     isAdmin: Boolean(row[4]),
     isActive: Boolean(row[5]),
-    twoFactorEnabled: Boolean(row[6]),
-    createdAt: new Date(String(row[7])),
-    updatedAt: new Date(String(row[8])),
+    createdAt: new Date(String(row[6])),
+    updatedAt: new Date(String(row[7])),
   };
 }
 
@@ -55,7 +54,7 @@ function setPermissions(userId: string, permissions: Permission[]): void {
 export function listUsers(): User[] {
   const db = getDatabase();
   const rows = db.query(
-    "SELECT id, username, email, display_name, is_admin, is_active, two_factor_enabled, created_at, updated_at FROM users ORDER BY created_at ASC",
+    "SELECT id, username, email, display_name, is_admin, is_active, created_at, updated_at FROM users ORDER BY created_at ASC",
   );
   return rows.map((r) => rowToUser(r as unknown[]));
 }
@@ -63,7 +62,7 @@ export function listUsers(): User[] {
 export function getUserById(id: string): UserWithPermissions | null {
   const db = getDatabase();
   const rows = db.query(
-    "SELECT id, username, email, display_name, is_admin, is_active, two_factor_enabled, created_at, updated_at FROM users WHERE id = ?",
+    "SELECT id, username, email, display_name, is_admin, is_active, created_at, updated_at FROM users WHERE id = ?",
     [id],
   );
   if (rows.length === 0) return null;
@@ -72,12 +71,10 @@ export function getUserById(id: string): UserWithPermissions | null {
   return user;
 }
 
-export function getUserByUsername(
-  username: string,
-): UserWithPermissions | null {
+export function getUserByUsername(username: string): UserWithPermissions | null {
   const db = getDatabase();
   const rows = db.query(
-    "SELECT id, username, email, display_name, is_admin, is_active, two_factor_enabled, created_at, updated_at FROM users WHERE username = ?",
+    "SELECT id, username, email, display_name, is_admin, is_active, created_at, updated_at FROM users WHERE username = ?",
     [username],
   );
   if (rows.length === 0) return null;
@@ -92,84 +89,15 @@ export function getUserByUsername(
  */
 export function getPasswordHash(username: string): string | null {
   const db = getDatabase();
-  const rows = db.query("SELECT password_hash FROM users WHERE username = ?", [
-    username,
-  ]);
+  const rows = db.query(
+    "SELECT password_hash FROM users WHERE username = ?",
+    [username],
+  );
   if (rows.length === 0) return null;
   return String((rows[0] as unknown[])[0]);
 }
 
-export function getUserTwoFactorState(userId: string): {
-  enabled: boolean;
-  encryptedSecret: string | null;
-  recoveryCodeHashes: string[];
-} | null {
-  const db = getDatabase();
-  const rows = db.query(
-    "SELECT two_factor_enabled, two_factor_secret, two_factor_recovery_codes FROM users WHERE id = ?",
-    [userId],
-  );
-  if (rows.length === 0) return null;
-  const row = rows[0] as unknown[];
-  let recoveryCodeHashes: string[] = [];
-  try {
-    recoveryCodeHashes = row[2] ? JSON.parse(String(row[2])) : [];
-    if (!Array.isArray(recoveryCodeHashes)) recoveryCodeHashes = [];
-  } catch {
-    recoveryCodeHashes = [];
-  }
-  return {
-    enabled: Boolean(row[0]),
-    encryptedSecret: row[1] ? String(row[1]) : null,
-    recoveryCodeHashes: recoveryCodeHashes.filter(
-      (h) => typeof h === "string" && h.length > 0,
-    ),
-  };
-}
-
-export function setUserTwoFactorState(
-  userId: string,
-  encryptedSecret: string,
-  recoveryCodeHashes: string[],
-): void {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  db.query(
-    "UPDATE users SET two_factor_enabled = 1, two_factor_secret = ?, two_factor_recovery_codes = ?, updated_at = ? WHERE id = ?",
-    [encryptedSecret, JSON.stringify(recoveryCodeHashes), now, userId],
-  );
-}
-
-export function consumeUserRecoveryCodeHash(
-  userId: string,
-  codeHash: string,
-): boolean {
-  const state = getUserTwoFactorState(userId);
-  if (!state) return false;
-  const idx = state.recoveryCodeHashes.findIndex((v) => v === codeHash);
-  if (idx === -1) return false;
-  state.recoveryCodeHashes.splice(idx, 1);
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  db.query(
-    "UPDATE users SET two_factor_recovery_codes = ?, updated_at = ? WHERE id = ?",
-    [JSON.stringify(state.recoveryCodeHashes), now, userId],
-  );
-  return true;
-}
-
-export function disableUserTwoFactor(userId: string): void {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  db.query(
-    "UPDATE users SET two_factor_enabled = 0, two_factor_secret = NULL, two_factor_recovery_codes = NULL, updated_at = ? WHERE id = ?",
-    [now, userId],
-  );
-}
-
-export async function createUser(
-  data: CreateUserRequest,
-): Promise<UserWithPermissions> {
+export async function createUser(data: CreateUserRequest): Promise<UserWithPermissions> {
   const db = getDatabase();
 
   // Validate required fields

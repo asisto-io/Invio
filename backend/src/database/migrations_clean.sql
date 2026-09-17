@@ -55,7 +55,6 @@ CREATE TABLE invoice_items (
   invoice_id TEXT REFERENCES invoices(id) ON DELETE CASCADE,
   description TEXT NOT NULL,
   quantity NUMERIC NOT NULL,
-  unit TEXT,
   unit_price NUMERIC NOT NULL,
   line_total NUMERIC NOT NULL,
   notes TEXT,
@@ -94,8 +93,7 @@ INSERT OR IGNORE INTO settings (key, value) VALUES
   ('paymentMethods', 'Bank Transfer, PayPal, Credit Card'),
   ('bankAccount', 'Account: 1234567890, Routing: 987654321'),
   ('paymentTerms', 'Due in 30 days'),
-  ('defaultNotes', 'Thank you for your business!'),
-  ('allowProtectedInvoiceChanges', 'false');
+  ('defaultNotes', 'Thank you for your business!');
 
 -- Insert a simple default template
 INSERT OR IGNORE INTO templates (id, name, html, is_default) VALUES 
@@ -117,9 +115,6 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   is_admin INTEGER NOT NULL DEFAULT 0,
   is_active INTEGER NOT NULL DEFAULT 1,
-  two_factor_secret TEXT,
-  two_factor_enabled INTEGER NOT NULL DEFAULT 0,
-  two_factor_recovery_codes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

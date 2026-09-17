@@ -2,9 +2,6 @@ import enRaw from "./locales/en.json" with { type: "json" };
 import nlRaw from "./locales/nl.json" with { type: "json" };
 import deRaw from "./locales/de.json" with { type: "json" };
 import ptBrRaw from "./locales/pt-br.json" with { type: "json" };
-import trRaw from "./locales/tr.json" with { type: "json" };
-import esCoRaw from "./locales/es-co.json" with { type: "json" };
-import esArRaw from "./locales/es-ar.json" with { type: "json" };
 
 export type InvoiceLabels = {
   invoiceTitle: string;
@@ -20,7 +17,6 @@ export type InvoiceLabels = {
   itemHeaderDescription: string;
   itemHeaderQuantity: string;
   itemHeaderQuantityShort: string;
-  itemHeaderUnit: string;
   itemHeaderUnitPrice: string;
   itemHeaderUnitPriceShort: string;
   itemHeaderAmount: string;
@@ -60,7 +56,6 @@ const REQUIRED_KEYS = [
   "itemHeaderDescription",
   "itemHeaderQuantity",
   "itemHeaderQuantityShort",
-  "itemHeaderUnit",
   "itemHeaderUnitPrice",
   "itemHeaderUnitPriceShort",
   "itemHeaderAmount",
@@ -93,9 +88,7 @@ function coerceLabels(locale: string, raw: unknown): InvoiceLabels {
   const record = raw as Record<string, unknown>;
   for (const key of REQUIRED_KEYS) {
     if (typeof record[key] !== "string") {
-      throw new Error(
-        `Missing or invalid key '${key}' in locale '${locale}' translations`,
-      );
+      throw new Error(`Missing or invalid key '${key}' in locale '${locale}' translations`);
     }
   }
   return Object.freeze(record as InvoiceLabels);
@@ -107,10 +100,6 @@ const catalogs: Record<string, InvoiceLabels> = Object.freeze({
   de: coerceLabels("de", deRaw),
   "pt-br": coerceLabels("pt-br", ptBrRaw),
   pt: coerceLabels("pt", ptBrRaw), // alias for pt-br
-  tr: coerceLabels("tr", trRaw),
-  "es-co": coerceLabels("es-co", esCoRaw),
-  es: coerceLabels("es", esCoRaw), // alias for es-co
-  "es-ar": coerceLabels("es-ar", esArRaw),
 });
 
 function normalizeLocale(locale?: string): string {
@@ -122,9 +111,7 @@ function normalizeLocale(locale?: string): string {
   return "en";
 }
 
-export function getInvoiceLabels(
-  locale?: string,
-): { locale: string; labels: InvoiceLabels } {
+export function getInvoiceLabels(locale?: string): { locale: string; labels: InvoiceLabels } {
   const normalized = normalizeLocale(locale);
   return { locale: normalized, labels: catalogs[normalized] };
 }

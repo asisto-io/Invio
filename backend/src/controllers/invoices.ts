@@ -4,13 +4,11 @@ import {
   getDatabase,
   getNextInvoiceNumber,
 } from "../database/init.ts";
-import { getSetting } from "./settings.ts";
 import {
   CreateInvoiceRequest,
   Invoice,
   InvoiceItem,
   InvoiceWithDetails,
-  StatusHistoryEntry,
   UpdateInvoiceRequest,
 } from "../types/index.ts";
 import { generateShareToken, generateUUID } from "../utils/uuid.ts";
@@ -24,10 +22,8 @@ type LineTaxInput = {
 };
 
 type ItemInput = {
-  productId?: string;
   description: string;
   quantity: number;
-  unit?: string;
   unitPrice: number;
   notes?: string;
   taxes?: LineTaxInput[];
@@ -41,28 +37,11 @@ type PerLineCalc = {
   // For each item index, the taxable base (after discount) and per-rate tax amounts
   perItem: Array<{
     taxable: number;
-    taxes: Array<{
-      percent: number;
-      amount: number;
-      note?: string;
-      taxDefinitionId?: string;
-    }>;
+    taxes: Array<{ percent: number; amount: number; note?: string; taxDefinitionId?: string }>;
   }>;
   // Summary grouped by percent
   summary: Array<{ percent: number; taxable: number; amount: number }>;
 };
-
-function isInvoiceProtectionOverrideEnabled(): boolean {
-  const raw = getSetting("allowProtectedInvoiceChanges");
-  if (raw === null || raw === undefined) return false;
-  const normalized = String(raw).trim().toLowerCase();
-  return (
-    normalized === "true" ||
-    normalized === "1" ||
-    normalized === "yes" ||
-    normalized === "on"
-  );
-}
 
 function calculatePerLineTotals(
   items: ItemInput[],
@@ -72,8 +51,8 @@ function calculatePerLineTotals(
   _roundingMode: "line" | "total" = "line",
 ): PerLineCalc {
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const lineGrosses = items.map(
-    (it) => (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0),
+  const lineGrosses = items.map((it) =>
+    (Number(it.quantity) || 0) * (Number(it.unitPrice) || 0)
   );
   const subtotal = lineGrosses.reduce((a, b) => a + b, 0);
 
@@ -105,20 +84,16 @@ function calculatePerLineTotals(
     const gross = lineGrosses[i] || 0;
     const afterDiscount = Math.max(0, gross - (lineDiscounts[i] || 0));
     const taxes = items[i].taxes || [];
-    const rateSum =
-      taxes.reduce((s, t) => s + (Number(t.percent) || 0), 0) / 100;
+    const rateSum = taxes.reduce((s, t) => s + (Number(t.percent) || 0), 0) /
+      100;
 
     let net = afterDiscount;
     if (pricesIncludeTax && rateSum > 0) {
       net = afterDiscount / (1 + rateSum);
     }
 
-    const itemTaxes: Array<{
-      percent: number;
-      amount: number;
-      note?: string;
-      taxDefinitionId?: string;
-    }> = [];
+    const itemTaxes: Array<{ percent: number; amount: number; note?: string; taxDefinitionId?: string }> =
+      [];
     for (const t of taxes) {
       const p = (Number(t.percent) || 0) / 100;
       const amt = r2(net * p);
@@ -163,71 +138,6 @@ function calculatePerLineTotals(
   };
 }
 
-function recordStatusChange(
-  db: ReturnType<typeof getDatabase>,
-  invoiceId: string,
-  status: string,
-  paymentMethod?: string,
-  note?: string,
-): void {
-  db.query(
-    `INSERT INTO invoice_status_history (id, invoice_id, status, changed_at, payment_method, note)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [
-      generateUUID(),
-      invoiceId,
-      status,
-      new Date().toISOString(),
-      paymentMethod ?? null,
-      note ?? null,
-    ],
-  );
-}
-
-export function getStatusHistory(invoiceId: string): StatusHistoryEntry[] {
-  const db = getDatabase();
-  const rows = db.query(
-    `SELECT id, invoice_id, status, changed_at, payment_method, note
-     FROM invoice_status_history
-     WHERE invoice_id = ?
-     ORDER BY changed_at ASC`,
-    [invoiceId],
-  ) as unknown[][];
-  return rows.map((r) => ({
-    id: String(r[0]),
-    invoiceId: String(r[1]),
-    status: String(r[2]),
-    changedAt: new Date(String(r[3])),
-    paymentMethod: r[4] ? String(r[4]) : undefined,
-    note: r[5] ? String(r[5]) : undefined,
-  }));
-}
-
-export function getLatestPaidPaymentMethods(
-  invoiceIds: string[],
-): Map<string, string> {
-  if (invoiceIds.length === 0) return new Map();
-  const db = getDatabase();
-  const placeholders = invoiceIds.map(() => "?").join(", ");
-  const rows = db.query(
-    `SELECT invoice_id, payment_method
-     FROM invoice_status_history
-     WHERE status = 'paid'
-       AND payment_method IS NOT NULL
-       AND payment_method != ''
-       AND invoice_id IN (${placeholders})
-     ORDER BY changed_at DESC`,
-    invoiceIds,
-  ) as unknown[][];
-  // Keep only the most recent payment method per invoice
-  const result = new Map<string, string>();
-  for (const row of rows) {
-    const id = String(row[0]);
-    if (!result.has(id)) result.set(id, String(row[1]));
-  }
-  return result;
-}
-
 export const createInvoice = (
   data: CreateInvoiceRequest,
 ): InvoiceWithDetails => {
@@ -246,15 +156,15 @@ export const createInvoice = (
       throw new Error("Invoice number already exists");
     }
   } else {
-    // If advanced numbering pattern with {SEQ}, {CSEQ}, or {CNUM} is active, allocate real number now; else draft placeholder
+    // If advanced numbering pattern with {SEQ} is active, allocate real number now; else draft placeholder
     try {
       const rows = db.query(
         "SELECT value FROM settings WHERE key = 'invoiceNumberPattern' LIMIT 1",
       );
       if (rows.length > 0) {
         const pattern = String((rows[0] as unknown[])[0] || "").trim();
-        if (pattern && /\{(C?SEQ|CNUM)\}/.test(pattern)) {
-          invoiceNumber = getNextInvoiceNumber(data.customerId);
+        if (pattern && /\{SEQ\}/.test(pattern)) {
+          invoiceNumber = getNextInvoiceNumber();
         } else {
           invoiceNumber = generateDraftInvoiceNumber();
         }
@@ -272,17 +182,15 @@ export const createInvoice = (
   // Determine tax behavior defaults
   const defaultPricesIncludeTax =
     String(settings.defaultPricesIncludeTax || "false").toLowerCase() ===
-    "true";
+      "true";
   const defaultRoundingMode = String(settings.defaultRoundingMode || "line");
   const defaultTaxRate = Number(settings.defaultTaxRate || 0) || 0;
 
   // Determine if per-line taxes are used
-  const hasPerLineTaxes =
-    Array.isArray(data.items) &&
-    data.items.some(
-      (i) =>
-        Array.isArray((i as { taxes?: LineTaxInput[] }).taxes) &&
-        ((i as { taxes?: LineTaxInput[] }).taxes?.length || 0) > 0,
+  const hasPerLineTaxes = Array.isArray(data.items) &&
+    data.items.some((i) =>
+      Array.isArray((i as { taxes?: LineTaxInput[] }).taxes) &&
+      (((i as { taxes?: LineTaxInput[] }).taxes?.length) || 0) > 0
     );
   let totals = { subtotal: 0, discountAmount: 0, taxAmount: 0, total: 0 };
   let perLineCalc: PerLineCalc | undefined = undefined;
@@ -309,7 +217,7 @@ export const createInvoice = (
       (typeof data.taxRate === "number" ? data.taxRate : defaultTaxRate) || 0,
       data.pricesIncludeTax ?? defaultPricesIncludeTax,
       (data.roundingMode as "line" | "total") ||
-        (defaultRoundingMode as "line" | "total"),
+        defaultRoundingMode as "line" | "total",
     );
   }
 
@@ -319,8 +227,8 @@ export const createInvoice = (
 
   // Get default settings for currency and payment terms
   const currency = data.currency || settings.currency || "USD";
-  const paymentTerms =
-    data.paymentTerms || settings.paymentTerms || "Due in 30 days";
+  const paymentTerms = data.paymentTerms || settings.paymentTerms ||
+    "Due in 30 days";
 
   const pricesIncludeTax = data.pricesIncludeTax ?? defaultPricesIncludeTax;
   const roundingMode = data.roundingMode || defaultRoundingMode;
@@ -338,7 +246,7 @@ export const createInvoice = (
     subtotal: totals.subtotal,
     discountAmount: totals.discountAmount,
     discountPercentage: data.discountPercentage || 0,
-    taxRate: hasPerLineTaxes ? 0 : data.taxRate || 0,
+    taxRate: hasPerLineTaxes ? 0 : (data.taxRate || 0),
     taxAmount: totals.taxAmount,
     total: totals.total,
 
@@ -386,7 +294,6 @@ export const createInvoice = (
       roundingMode,
     ],
   );
-  recordStatusChange(db, invoiceId, invoice.status || "draft");
 
   // Insert invoice items
   const items: InvoiceItem[] = [];
@@ -394,15 +301,12 @@ export const createInvoice = (
     const item = data.items[i];
     const itemId = generateUUID();
     const lineTotal = item.quantity * item.unitPrice;
-    const unit = typeof item.unit === "string" ? item.unit.trim() : "";
 
     const invoiceItem: InvoiceItem = {
       id: itemId,
       invoiceId: invoiceId,
-      productId: item.productId || undefined,
       description: item.description,
       quantity: item.quantity,
-      unit: unit || undefined,
       unitPrice: item.unitPrice,
       lineTotal,
       notes: item.notes,
@@ -411,15 +315,13 @@ export const createInvoice = (
 
     db.query(
       `INSERT INTO invoice_items (
-        id, invoice_id, product_id, description, quantity, unit, unit_price, line_total, notes, sort_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         itemId,
         invoiceId,
-        item.productId || null,
         item.description,
         item.quantity,
-        unit || null,
         item.unitPrice,
         lineTotal,
         item.notes,
@@ -475,17 +377,16 @@ export const createInvoice = (
   } else {
     const rawTaxDefId = (data as { taxDefinitionId?: string | null })
       .taxDefinitionId;
-    const taxDefinitionId =
-      typeof rawTaxDefId === "string" ? rawTaxDefId.trim() : "";
+    const taxDefinitionId = typeof rawTaxDefId === "string"
+      ? rawTaxDefId.trim()
+      : "";
     if (taxDefinitionId) {
       const r2 = (n: number) => Math.round(n * 100) / 100;
       const percent = invoice.taxRate || 0;
       const rate = Math.max(0, Number(percent) || 0) / 100;
       const afterDiscount = r2(invoice.subtotal - invoice.discountAmount);
       const taxable = pricesIncludeTax
-        ? rate > 0
-          ? r2(afterDiscount / (1 + rate))
-          : afterDiscount
+        ? (rate > 0 ? r2(afterDiscount / (1 + rate)) : afterDiscount)
         : afterDiscount;
       db.query(
         `INSERT INTO invoice_taxes (id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at)
@@ -513,17 +414,16 @@ export const createInvoice = (
     ...invoice,
     customer,
     items,
-    taxes:
-      hasPerLineTaxes && perLineCalc
-        ? perLineCalc.summary.map((s) => ({
-            id: "",
-            invoiceId: invoiceId,
-            taxDefinitionId: undefined,
-            percent: s.percent,
-            taxableAmount: s.taxable,
-            taxAmount: s.amount,
-          }))
-        : undefined,
+    taxes: hasPerLineTaxes && perLineCalc
+      ? perLineCalc.summary.map((s) => ({
+        id: "",
+        invoiceId: invoiceId,
+        taxDefinitionId: undefined,
+        percent: s.percent,
+        taxableAmount: s.taxable,
+        taxAmount: s.amount,
+      }))
+      : undefined,
   };
 };
 
@@ -534,7 +434,7 @@ export const getInvoices = (): Invoice[] => {
            subtotal, discount_amount, discount_percentage, tax_rate, tax_amount, total,
            payment_terms, notes, share_token, created_at, updated_at,
            prices_include_tax, rounding_mode
-    FROM invoices
+    FROM invoices 
     ORDER BY created_at DESC
   `);
   const list = results.map((row: unknown[]) => mapRowToInvoice(row));
@@ -549,7 +449,7 @@ export const getInvoiceById = (id: string): InvoiceWithDetails | null => {
            subtotal, discount_amount, discount_percentage, tax_rate, tax_amount, total,
            payment_terms, notes, share_token, created_at, updated_at,
            prices_include_tax, rounding_mode
-    FROM invoices
+    FROM invoices 
     WHERE id = ?
   `,
     [id],
@@ -567,9 +467,9 @@ export const getInvoiceById = (id: string): InvoiceWithDetails | null => {
   // Get items
   const itemsResult = db.query(
     `
-    SELECT id, invoice_id, product_id, description, quantity, unit, unit_price, line_total, notes, sort_order
-    FROM invoice_items
-    WHERE invoice_id = ?
+    SELECT id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order
+    FROM invoice_items 
+    WHERE invoice_id = ? 
     ORDER BY sort_order
   `,
     [id],
@@ -578,14 +478,12 @@ export const getInvoiceById = (id: string): InvoiceWithDetails | null => {
   const items = itemsResult.map((row: unknown[]) => ({
     id: row[0] as string,
     invoiceId: row[1] as string,
-    productId: row[2] ? String(row[2]) : undefined,
-    description: row[3] as string,
-    quantity: row[4] as number,
-    unit: row[5] ? String(row[5]) : undefined,
-    unitPrice: row[6] as number,
-    lineTotal: row[7] as number,
-    notes: row[8] as string,
-    sortOrder: row[9] as number,
+    description: row[2] as string,
+    quantity: row[3] as number,
+    unitPrice: row[4] as number,
+    lineTotal: row[5] as number,
+    notes: row[6] as string,
+    sortOrder: row[7] as number,
   }));
 
   // Attach per-item taxes
@@ -608,9 +506,7 @@ export const getInvoiceById = (id: string): InvoiceWithDetails | null => {
     for (const r of taxRows) {
       const itemId = String((r as unknown[])[0]);
       const tax: ItemTaxRow = {
-        taxDefinitionId: (r as unknown[])[1]
-          ? String((r as unknown[])[1])
-          : undefined,
+        taxDefinitionId: (r as unknown[])[1] ? String((r as unknown[])[1]) : undefined,
         percent: Number((r as unknown[])[2]),
         taxableAmount: Number((r as unknown[])[3]),
         amount: Number((r as unknown[])[4]),
@@ -640,8 +536,12 @@ export const getInvoiceById = (id: string): InvoiceWithDetails | null => {
     taxAmount: Number(r[5] as number),
   }));
 
-  const statusHistory = getStatusHistory(id);
-  return { ...invoice, customer, items: itemsWithTaxes, taxes, statusHistory };
+  return {
+    ...invoice,
+    customer,
+    items: itemsWithTaxes,
+    taxes,
+  };
 };
 
 export const getInvoiceByShareToken = (
@@ -654,7 +554,7 @@ export const getInvoiceByShareToken = (
            subtotal, discount_amount, discount_percentage, tax_rate, tax_amount, total,
            payment_terms, notes, share_token, created_at, updated_at,
            prices_include_tax, rounding_mode
-    FROM invoices
+    FROM invoices 
     WHERE share_token = ?
   `,
     [shareToken],
@@ -675,9 +575,9 @@ export const getInvoiceByShareToken = (
   // Get items
   const itemsResult = db.query(
     `
-    SELECT id, invoice_id, product_id, description, quantity, unit, unit_price, line_total, notes, sort_order
-    FROM invoice_items
-    WHERE invoice_id = ?
+    SELECT id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order
+    FROM invoice_items 
+    WHERE invoice_id = ? 
     ORDER BY sort_order
   `,
     [invoice.id],
@@ -686,14 +586,12 @@ export const getInvoiceByShareToken = (
   const items = itemsResult.map((row: unknown[]) => ({
     id: row[0] as string,
     invoiceId: row[1] as string,
-    productId: row[2] ? String(row[2]) : undefined,
-    description: row[3] as string,
-    quantity: row[4] as number,
-    unit: row[5] ? String(row[5]) : undefined,
-    unitPrice: row[6] as number,
-    lineTotal: row[7] as number,
-    notes: row[8] as string,
-    sortOrder: row[9] as number,
+    description: row[2] as string,
+    quantity: row[3] as number,
+    unitPrice: row[4] as number,
+    lineTotal: row[5] as number,
+    notes: row[6] as string,
+    sortOrder: row[7] as number,
   }));
 
   // Attach per-item taxes
@@ -716,9 +614,7 @@ export const getInvoiceByShareToken = (
     for (const r of taxRows) {
       const itemId = String((r as unknown[])[0]);
       const tax: ItemTaxRow2 = {
-        taxDefinitionId: (r as unknown[])[1]
-          ? String((r as unknown[])[1])
-          : undefined,
+        taxDefinitionId: (r as unknown[])[1] ? String((r as unknown[])[1]) : undefined,
         percent: Number((r as unknown[])[2]),
         taxableAmount: Number((r as unknown[])[3]),
         amount: Number((r as unknown[])[4]),
@@ -748,8 +644,12 @@ export const getInvoiceByShareToken = (
     taxAmount: Number(r[5] as number),
   }));
 
-  const statusHistory = getStatusHistory(String(invoice.id));
-  return { ...invoice, customer, items: itemsWithTaxes, taxes, statusHistory };
+  return {
+    ...invoice,
+    customer,
+    items: itemsWithTaxes,
+    taxes,
+  };
 };
 
 export const updateInvoice = async (
@@ -764,7 +664,9 @@ export const updateInvoice = async (
   // Immutability: prevent structural changes once sent/paid
   // Voided invoices are completely locked — only deletion is allowed
   if (existing.status === "voided") {
-    throw new Error("Voided invoices cannot be modified.");
+    throw new Error(
+      "Voided invoices cannot be modified.",
+    );
   }
 
   // Validate status transitions
@@ -780,13 +682,14 @@ export const updateInvoice = async (
       voided: [],
     };
     if (!(allowed[from] || []).includes(to)) {
-      throw new Error(`Cannot change status from '${from}' to '${to}'.`);
+      throw new Error(
+        `Cannot change status from '${from}' to '${to}'.`,
+      );
     }
   }
 
   const isIssued = existing.status !== "draft";
-  const allowProtectedChanges = isInvoiceProtectionOverrideEnabled();
-  if (isIssued && !allowProtectedChanges) {
+  if (isIssued) {
     const forbidden = [
       "items",
       "discountAmount",
@@ -836,9 +739,9 @@ export const updateInvoice = async (
 
   let perLineCalcUpdate: PerLineCalc | undefined = undefined;
   if (data.items) {
-    const hasPerLine = (data.items as Array<{ taxes?: LineTaxInput[] }>).some(
-      (i) => Array.isArray(i.taxes) && (i.taxes?.length || 0) > 0,
-    );
+    const hasPerLine = (data.items as Array<{ taxes?: LineTaxInput[] }>).some((
+      i,
+    ) => Array.isArray(i.taxes) && (i.taxes?.length || 0) > 0);
     if (hasPerLine) {
       perLineCalcUpdate = calculatePerLineTotals(
         data.items as unknown as ItemInput[],
@@ -846,8 +749,7 @@ export const updateInvoice = async (
         data.discountAmount ?? existing.discountAmount,
         data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false,
         (data.roundingMode as "line" | "total") ||
-          (existing.roundingMode as "line" | "total") ||
-          "line",
+          (existing.roundingMode as "line" | "total") || "line",
       );
       totals = {
         subtotal: perLineCalcUpdate.subtotal,
@@ -863,8 +765,7 @@ export const updateInvoice = async (
         data.taxRate ?? existing.taxRate,
         data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false,
         (data.roundingMode as "line" | "total") ||
-          (existing.roundingMode as "line" | "total") ||
-          "line",
+          (existing.roundingMode as "line" | "total") || "line",
       );
     }
   }
@@ -878,12 +779,10 @@ export const updateInvoice = async (
     return v.trim().length === 0 ? "" : v;
   })();
 
-  db.execute("BEGIN");
-  try {
-    // Update invoice
-    db.query(
-      `
-    UPDATE invoices SET
+  // Update invoice
+  db.query(
+    `
+    UPDATE invoices SET 
       customer_id = ?, issue_date = ?, due_date = ?, currency = ?, status = ?,
       subtotal = ?, discount_amount = ?, discount_percentage = ?, tax_rate = ?, tax_amount = ?, total = ?,
       payment_terms = ?, notes = ?, updated_at = ?,
@@ -892,212 +791,179 @@ export const updateInvoice = async (
       invoice_number = COALESCE(?, invoice_number)
     WHERE id = ?
   `,
-      [
-        data.customerId ?? existing.customerId,
-        data.issueDate ? new Date(data.issueDate) : existing.issueDate,
-        data.dueDate === null || data.dueDate === ""
-          ? null
-          : data.dueDate
-            ? new Date(data.dueDate)
-            : existing.dueDate,
-        data.currency ?? existing.currency,
-        data.status ?? existing.status,
-        totals.subtotal,
-        totals.discountAmount,
-        data.discountPercentage ?? existing.discountPercentage,
-        data.taxRate ?? existing.taxRate,
-        totals.taxAmount,
-        totals.total,
-        data.paymentTerms ?? existing.paymentTerms,
-        normalizedNotes !== undefined ? normalizedNotes : existing.notes,
-        updatedAt,
-        typeof data.pricesIncludeTax === "boolean"
-          ? data.pricesIncludeTax
-            ? 1
-            : 0
-          : null,
-        data.roundingMode ?? null,
-        nextInvoiceNumber ?? null,
-        id,
-      ],
-    );
-    // Lock a final invoice number when transitioning out of draft without a custom number
+    [
+      data.customerId ?? existing.customerId,
+      data.issueDate ? new Date(data.issueDate) : existing.issueDate,
+      (data.dueDate === null || data.dueDate === "")
+        ? null
+        : (data.dueDate ? new Date(data.dueDate) : existing.dueDate),
+      data.currency ?? existing.currency,
+      data.status ?? existing.status,
+      totals.subtotal,
+      totals.discountAmount,
+      data.discountPercentage ?? existing.discountPercentage,
+      data.taxRate ?? existing.taxRate,
+      totals.taxAmount,
+      totals.total,
+      data.paymentTerms ?? existing.paymentTerms,
+      normalizedNotes !== undefined ? normalizedNotes : existing.notes,
+      updatedAt,
+      typeof data.pricesIncludeTax === "boolean"
+        ? (data.pricesIncludeTax ? 1 : 0)
+        : null,
+      data.roundingMode ?? null,
+      nextInvoiceNumber ?? null,
+      id,
+    ],
+  );
+  // If transitioning from draft to sent/paid, lock a final invoice number when still using a draft placeholder
+  if (
+    (data.status === "sent" || data.status === "paid") &&
+    existing.status === "draft"
+  ) {
+    // Reload current to check number
+    const current = await getInvoiceById(id);
     if (
-      (data.status === "sent" || data.status === "paid") &&
-      existing.status === "draft" &&
-      !nextInvoiceNumber &&
-      existing.invoiceNumber.startsWith("DRAFT-")
+      current && current.invoiceNumber &&
+      current.invoiceNumber.startsWith("DRAFT-")
     ) {
-      const finalNum = getNextInvoiceNumber(
-        data.customerId ?? existing.customerId,
-      );
+      const finalNum = getNextInvoiceNumber();
       db.query(
         "UPDATE invoices SET invoice_number = ?, updated_at = ? WHERE id = ?",
         [finalNum, new Date(), id],
       );
     }
+  }
 
-    // Record status transition in history
-    if (data.status && data.status !== existing.status) {
-      recordStatusChange(
-        db,
-        id,
-        data.status,
-        data.status === "paid" ? data.paymentMethod : undefined,
-      );
-    }
+  // Update items if provided
+  if (data.items) {
+    // Delete existing taxes, then items
+    db.query(
+      "DELETE FROM invoice_item_taxes WHERE invoice_item_id IN (SELECT id FROM invoice_items WHERE invoice_id = ?)",
+      [id],
+    );
+    db.query("DELETE FROM invoice_taxes WHERE invoice_id = ?", [id]);
+    db.query("DELETE FROM invoice_items WHERE invoice_id = ?", [id]);
 
-    // Update items if provided
-    if (data.items) {
-      // Delete existing taxes, then items
+    // Insert new items
+    for (let i = 0; i < data.items.length; i++) {
+      const item = data.items[i];
+      const itemId = generateUUID();
+      const lineTotal = item.quantity * item.unitPrice;
+
       db.query(
-        "DELETE FROM invoice_item_taxes WHERE invoice_item_id IN (SELECT id FROM invoice_items WHERE invoice_id = ?)",
-        [id],
-      );
-      db.query("DELETE FROM invoice_taxes WHERE invoice_id = ?", [id]);
-      db.query("DELETE FROM invoice_items WHERE invoice_id = ?", [id]);
-
-      // Insert new items
-      for (let i = 0; i < data.items.length; i++) {
-        const item = data.items[i];
-        const itemId = generateUUID();
-        const lineTotal = item.quantity * item.unitPrice;
-        const unit = typeof item.unit === "string" ? item.unit.trim() : "";
-
-        db.query(
-          `
+        `
         INSERT INTO invoice_items (
-          id, invoice_id, product_id, description, quantity, unit, unit_price, line_total, notes, sort_order
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `,
-          [
-            itemId,
-            id,
-            item.productId || null,
-            item.description,
-            item.quantity,
-            unit || null,
-            item.unitPrice,
-            lineTotal,
-            item.notes,
-            i,
-          ],
-        );
+        [
+          itemId,
+          id,
+          item.description,
+          item.quantity,
+          item.unitPrice,
+          lineTotal,
+          item.notes,
+          i,
+        ],
+      );
 
-        if (perLineCalcUpdate) {
-          const calc = perLineCalcUpdate.perItem[i];
-          if (
-            calc &&
-            Array.isArray((item as { taxes?: LineTaxInput[] }).taxes)
-          ) {
-            for (const t of calc.taxes) {
-              db.query(
-                `INSERT INTO invoice_item_taxes (id, invoice_item_id, tax_definition_id, percent, taxable_amount, amount, included, sequence, note, created_at)
+      if (perLineCalcUpdate) {
+        const calc = perLineCalcUpdate.perItem[i];
+        if (calc && Array.isArray((item as { taxes?: LineTaxInput[] }).taxes)) {
+          for (const t of calc.taxes) {
+            db.query(
+              `INSERT INTO invoice_item_taxes (id, invoice_item_id, tax_definition_id, percent, taxable_amount, amount, included, sequence, note, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [
-                  generateUUID(),
-                  itemId,
-                  t.taxDefinitionId || null,
-                  t.percent,
-                  calc.taxable,
-                  t.amount,
-                  (data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false)
-                    ? 1
-                    : 0,
-                  0,
-                  t.note || null,
-                  new Date(),
-                ],
-              );
-            }
+              [
+                generateUUID(),
+                itemId,
+                t.taxDefinitionId || null,
+                t.percent,
+                calc.taxable,
+                t.amount,
+                (data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false)
+                  ? 1
+                  : 0,
+                0,
+                t.note || null,
+                new Date(),
+              ],
+            );
           }
         }
       }
-
-      if (perLineCalcUpdate) {
-        for (const s of perLineCalcUpdate.summary) {
-          db.query(
-            `INSERT INTO invoice_taxes (id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              generateUUID(),
-              id,
-              null,
-              s.percent,
-              s.taxable,
-              s.amount,
-              new Date(),
-            ],
-          );
-        }
-      }
     }
 
-    // If using invoice-level tax (no per-line taxes), optionally persist a single invoice tax definition.
-    const existingHasPerLineTaxes = (existing.items || []).some(
-      (it) => Array.isArray(it.taxes) && it.taxes.length > 0,
+    if (perLineCalcUpdate) {
+      for (const s of perLineCalcUpdate.summary) {
+        db.query(
+          `INSERT INTO invoice_taxes (id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            generateUUID(),
+            id,
+            null,
+            s.percent,
+            s.taxable,
+            s.amount,
+            new Date(),
+          ],
+        );
+      }
+    }
+  }
+
+  // If using invoice-level tax (no per-line taxes), optionally persist a single invoice tax definition.
+  const existingHasPerLineTaxes = (existing.items || []).some((it) =>
+    Array.isArray(it.taxes) && it.taxes.length > 0
+  );
+  const nextHasPerLineTaxes = data.items ? !!perLineCalcUpdate : existingHasPerLineTaxes;
+
+  if (!nextHasPerLineTaxes) {
+    const hasTaxDefinitionIdInRequest = Object.prototype.hasOwnProperty.call(
+      data,
+      "taxDefinitionId",
     );
-    const nextHasPerLineTaxes = data.items
-      ? !!perLineCalcUpdate
-      : existingHasPerLineTaxes;
 
-    if (!nextHasPerLineTaxes) {
-      const hasTaxDefinitionIdInRequest = Object.prototype.hasOwnProperty.call(
-        data,
-        "taxDefinitionId",
-      );
+    if (data.items || hasTaxDefinitionIdInRequest) {
+      const rawTaxDefId = (data as { taxDefinitionId?: string | null })
+        .taxDefinitionId;
+      const requested = typeof rawTaxDefId === "string" ? rawTaxDefId.trim() : "";
+      const effectiveTaxDefinitionId = hasTaxDefinitionIdInRequest
+        ? (requested || undefined)
+        : (existing.taxes && existing.taxes.length > 0
+          ? existing.taxes[0].taxDefinitionId
+          : undefined);
 
-      if (data.items || hasTaxDefinitionIdInRequest) {
-        const rawTaxDefId = (data as { taxDefinitionId?: string | null })
-          .taxDefinitionId;
-        const requested =
-          typeof rawTaxDefId === "string" ? rawTaxDefId.trim() : "";
-        const effectiveTaxDefinitionId = hasTaxDefinitionIdInRequest
-          ? requested || undefined
-          : existing.taxes && existing.taxes.length > 0
-            ? existing.taxes[0].taxDefinitionId
-            : undefined;
+      // Replace existing invoice_taxes rows (invoice-level mode only)
+      db.query("DELETE FROM invoice_taxes WHERE invoice_id = ?", [id]);
 
-        // Replace existing invoice_taxes rows (invoice-level mode only)
-        db.query("DELETE FROM invoice_taxes WHERE invoice_id = ?", [id]);
-
-        if (effectiveTaxDefinitionId) {
-          const r2 = (n: number) => Math.round(n * 100) / 100;
-          const percent = (data.taxRate ?? existing.taxRate) || 0;
-          const rate = Math.max(0, Number(percent) || 0) / 100;
-          const includeTax =
-            data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false;
-          const afterDiscount = r2(totals.subtotal - totals.discountAmount);
-          const taxable = includeTax
-            ? rate > 0
-              ? r2(afterDiscount / (1 + rate))
-              : afterDiscount
-            : afterDiscount;
-          db.query(
-            `INSERT INTO invoice_taxes (id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at)
+      if (effectiveTaxDefinitionId) {
+        const r2 = (n: number) => Math.round(n * 100) / 100;
+        const percent = (data.taxRate ?? existing.taxRate) || 0;
+        const rate = Math.max(0, Number(percent) || 0) / 100;
+        const includeTax = (data.pricesIncludeTax ?? existing.pricesIncludeTax ?? false);
+        const afterDiscount = r2(totals.subtotal - totals.discountAmount);
+        const taxable = includeTax
+          ? (rate > 0 ? r2(afterDiscount / (1 + rate)) : afterDiscount)
+          : afterDiscount;
+        db.query(
+          `INSERT INTO invoice_taxes (id, invoice_id, tax_definition_id, percent, taxable_amount, tax_amount, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [
-              generateUUID(),
-              id,
-              effectiveTaxDefinitionId,
-              percent,
-              taxable,
-              totals.taxAmount,
-              new Date(),
-            ],
-          );
-        }
+          [
+            generateUUID(),
+            id,
+            effectiveTaxDefinitionId,
+            percent,
+            taxable,
+            totals.taxAmount,
+            new Date(),
+          ],
+        );
       }
     }
-
-    db.execute("COMMIT");
-  } catch (e) {
-    try {
-      db.execute("ROLLBACK");
-    } catch {
-      /* ignore */
-    }
-    throw e;
   }
 
   return await getInvoiceById(id);
@@ -1107,13 +973,8 @@ export const deleteInvoice = async (id: string): Promise<boolean> => {
   const existing = await getInvoiceById(id);
   if (!existing) throw new Error("Invoice not found");
 
-  const allowProtectedChanges = isInvoiceProtectionOverrideEnabled();
   // Only draft invoices can be deleted; issued invoices must be voided for audit trail
-  if (
-    !allowProtectedChanges &&
-    existing.status !== "draft" &&
-    existing.status !== "voided"
-  ) {
+  if (existing.status !== "draft" && existing.status !== "voided") {
     throw new Error(
       "Only draft or voided invoices can be deleted. Void the invoice first.",
     );
@@ -1148,10 +1009,8 @@ export const duplicateInvoice = async (
     original.discountAmount,
     original.taxRate,
   );
-  db.execute("BEGIN");
-  try {
-    db.query(
-      `
+  db.query(
+    `
     INSERT INTO invoices (
       id, invoice_number, customer_id, issue_date, due_date, currency, status,
       subtotal, discount_amount, discount_percentage, tax_rate, tax_amount, total,
@@ -1159,61 +1018,49 @@ export const duplicateInvoice = async (
       prices_include_tax, rounding_mode
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `,
+    [
+      newId,
+      generateDraftInvoiceNumber(),
+      original.customerId,
+      now,
+      original.dueDate || null,
+      original.currency,
+      "draft",
+      totals.subtotal,
+      totals.discountAmount,
+      original.discountPercentage,
+      original.taxRate,
+      totals.taxAmount,
+      totals.total,
+      original.paymentTerms || null,
+      original.notes || null,
+      newShare,
+      now,
+      now,
+      (original as Invoice).pricesIncludeTax ? 1 : 0,
+      (original as Invoice).roundingMode || "line",
+    ],
+  );
+  // Copy items
+  for (const [idx, it] of items.entries()) {
+    const itemId = generateUUID();
+    db.query(
+      `
+      INSERT INTO invoice_items (
+        id, invoice_id, description, quantity, unit_price, line_total, notes, sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `,
       [
+        itemId,
         newId,
-        generateDraftInvoiceNumber(),
-        original.customerId,
-        now,
-        original.dueDate || null,
-        original.currency,
-        "draft",
-        totals.subtotal,
-        totals.discountAmount,
-        original.discountPercentage,
-        original.taxRate,
-        totals.taxAmount,
-        totals.total,
-        original.paymentTerms || null,
-        original.notes || null,
-        newShare,
-        now,
-        now,
-        (original as Invoice).pricesIncludeTax ? 1 : 0,
-        (original as Invoice).roundingMode || "line",
+        it.description,
+        it.quantity,
+        it.unitPrice,
+        it.lineTotal,
+        it.notes || null,
+        idx,
       ],
     );
-    // Copy items
-    for (const [idx, it] of items.entries()) {
-      const itemId = generateUUID();
-      db.query(
-        `
-      INSERT INTO invoice_items (
-        id, invoice_id, product_id, description, quantity, unit, unit_price, line_total, notes, sort_order
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `,
-        [
-          itemId,
-          newId,
-          it.productId || null,
-          it.description,
-          it.quantity,
-          it.unit || null,
-          it.unitPrice,
-          it.lineTotal,
-          it.notes || null,
-          idx,
-        ],
-      );
-    }
-    recordStatusChange(db, newId, "draft");
-    db.execute("COMMIT");
-  } catch (e) {
-    try {
-      db.execute("ROLLBACK");
-    } catch {
-      /* ignore */
-    }
-    throw e;
   }
   return await getInvoiceById(newId);
 };
@@ -1241,27 +1088,16 @@ export const publishInvoice = async (
   // Update status to 'sent' if it's currently 'draft'
   if (invoice.status === "draft") {
     const db = getDatabase();
+    // If invoice number is a DRAFT placeholder, assign a final number now and lock it
     const now = new Date();
     let num = invoice.invoiceNumber;
     if (num.startsWith("DRAFT-")) {
-      num = getNextInvoiceNumber(invoice.customerId);
+      num = getNextInvoiceNumber();
     }
-    db.execute("BEGIN");
-    try {
-      db.query(
-        "UPDATE invoices SET status = 'sent', invoice_number = ?, updated_at = ? WHERE id = ?",
-        [num, now, id],
-      );
-      recordStatusChange(db, id, "sent");
-      db.execute("COMMIT");
-    } catch (e) {
-      try {
-        db.execute("ROLLBACK");
-      } catch {
-        /* ignore */
-      }
-      throw e;
-    }
+    db.query(
+      "UPDATE invoices SET status = 'sent', invoice_number = ?, updated_at = ? WHERE id = ?",
+      [num, now, id],
+    );
   }
 
   const shareUrl = `${
@@ -1281,35 +1117,30 @@ export const unpublishInvoice = async (
   if (!existing) throw new Error("Invoice not found");
 
   // Only sent or overdue invoices can be unpublished
-  if (existing.status !== "sent" && existing.status !== "overdue") {
-    throw new Error("Only sent or overdue invoices can be unpublished.");
+  if (
+    existing.status !== "sent" &&
+    existing.status !== "overdue"
+  ) {
+    throw new Error(
+      "Only sent or overdue invoices can be unpublished.",
+    );
   }
 
   const db = getDatabase();
   const newToken = generateShareToken();
   const now = new Date();
   // Rotate share token to invalidate old public links and revert invoice to draft
-  db.execute("BEGIN");
-  try {
-    db.query(
-      "UPDATE invoices SET share_token = ?, status = 'draft', updated_at = ? WHERE id = ?",
-      [newToken, now, id],
-    );
-    recordStatusChange(db, id, "draft");
-    db.execute("COMMIT");
-  } catch (e) {
-    try {
-      db.execute("ROLLBACK");
-    } catch {
-      /* ignore */
-    }
-    throw e;
-  }
+  db.query(
+    "UPDATE invoices SET share_token = ?, status = 'draft', updated_at = ? WHERE id = ?",
+    [newToken, now, id],
+  );
 
   return { shareToken: newToken };
 };
 
-export const voidInvoice = async (id: string): Promise<{ success: true }> => {
+export const voidInvoice = async (
+  id: string,
+): Promise<{ success: true }> => {
   const existing = await getInvoiceById(id);
   if (!existing) throw new Error("Invoice not found");
   if (existing.status === "voided") {
@@ -1331,22 +1162,10 @@ export const voidInvoice = async (id: string): Promise<{ success: true }> => {
 
   const db = getDatabase();
   const now = new Date();
-  db.execute("BEGIN");
-  try {
-    db.query(
-      "UPDATE invoices SET status = 'voided', updated_at = ? WHERE id = ?",
-      [now, id],
-    );
-    recordStatusChange(db, id, "voided");
-    db.execute("COMMIT");
-  } catch (e) {
-    try {
-      db.execute("ROLLBACK");
-    } catch {
-      /* ignore */
-    }
-    throw e;
-  }
+  db.query(
+    "UPDATE invoices SET status = 'voided', updated_at = ? WHERE id = ?",
+    [now, id],
+  );
 
   return { success: true };
 };
@@ -1360,13 +1179,7 @@ function mapRowToInvoice(row: unknown[]): Invoice {
     issueDate: new Date(row[3] as string),
     dueDate: row[4] ? new Date(row[4] as string) : undefined,
     currency: row[5] as string,
-    status: row[6] as
-      | "draft"
-      | "sent"
-      | "complete"
-      | "paid"
-      | "overdue"
-      | "voided",
+    status: row[6] as "draft" | "sent" | "complete" | "paid" | "overdue" | "voided",
     subtotal: row[7] as number,
     discountAmount: row[8] as number,
     discountPercentage: row[9] as number,
@@ -1387,12 +1200,7 @@ function applyDerivedOverdue<
   T extends { status: Invoice["status"]; dueDate?: Date },
 >(inv: T): T {
   if (!inv) return inv;
-  if (
-    inv.status === "paid" ||
-    inv.status === "voided" ||
-    inv.status === "complete"
-  )
-    return inv;
+  if (inv.status === "paid" || inv.status === "voided" || inv.status === "complete") return inv;
   if (!inv.dueDate) return inv;
   const today = new Date();
   const dd = new Date(

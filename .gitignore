@@ -19,4 +19,3 @@
 .DS_Store
 /backend/data/*
 /chrome-headless-shell
-.claude/settings.local.json

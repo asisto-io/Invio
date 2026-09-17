@@ -6,10 +6,8 @@ import { getSettings } from "../controllers/settings.ts";
 import { buildInvoiceHTML, generatePDF } from "../utils/pdf.ts";
 import { generateUBLInvoiceXML } from "../utils/ubl.ts"; // legacy direct import (will be removed after deprecation window)
 import { generateInvoiceXML, listXMLProfiles } from "../utils/xmlProfiles.ts";
-import { resolveInDataRoot } from "../utils/dataPaths.ts";
 import {
   contentTypeFromLogoPath,
-  normalizeStoredLogoReference,
   resolveLogoFsPathFromPublicPath,
 } from "../utils/logoStorage.ts";
 
@@ -22,26 +20,13 @@ function isSafeTemplateIdentifier(value: string): boolean {
 // Expose a lightweight public endpoint so unauthenticated clients can
 // detect whether the backend is running in demo (read-only) mode.
 const DEMO_MODE = (Deno.env.get("DEMO_MODE") || "").toLowerCase() === "true";
-const DEMO_RESET_HOURS = parseFloat(Deno.env.get("DEMO_RESET_HOURS") || "0.5");
-
 publicRoutes.get("/demo-mode", (c) => {
-  // Janky function I wrote at night. 0.5 -> 30 min is the main idea
-  if (DEMO_MODE == true) {
-    const resetMinutes = DEMO_RESET_HOURS * 60;
-    return c.json({
-      demoMode: DEMO_MODE,
-      demoResetMinutes: resetMinutes,
-    });
-  } else {
-    return c.json({ demoMode: DEMO_MODE });
-  }
+  return c.json({ demoMode: DEMO_MODE });
 });
 
 publicRoutes.get("/public/assets/logos/:file", async (c) => {
   const file = c.req.param("file") || "";
-  const fsPath = resolveLogoFsPathFromPublicPath(
-    `/public/assets/logos/${file}`,
-  );
+  const fsPath = resolveLogoFsPathFromPublicPath(`/public/assets/logos/${file}`);
   if (!fsPath) return c.notFound();
 
   try {
@@ -69,7 +54,7 @@ publicRoutes.get("/_template-assets/:id/:version/*", async (c) => {
     return c.notFound();
   }
 
-  const baseDir = resolveInDataRoot("templates");
+  const baseDir = resolve("./data/templates");
   const candidate = resolve(baseDir, id, version, normalizedRest);
   const relativePath = relative(baseDir, candidate);
   if (!relativePath || relativePath.startsWith("..")) {
@@ -104,24 +89,14 @@ publicRoutes.get("/public/invoices/:share_token/pdf", async (c) => {
 
   // Settings map
   const settings = getSettings();
-  const settingsMap = settings.reduce(
-    (acc: Record<string, string>, s) => {
-      acc[s.key] = s.value;
-      return acc;
-    },
-    {} as Record<string, string>,
-  );
-  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) {
-    settingsMap.postalCityFormat = settingsMap.postal_city_format;
-  }
-  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) {
-    settingsMap.postalCityFormat = settingsMap.postalcityformat;
-  }
+  const settingsMap = settings.reduce((acc: Record<string, string>, s) => {
+    acc[s.key] = s.value;
+    return acc;
+  }, {} as Record<string, string>);
+  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) settingsMap.postalCityFormat = settingsMap.postal_city_format;
+  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) settingsMap.postalCityFormat = settingsMap.postalcityformat;
   if (!settingsMap.logo && settingsMap.logoUrl) {
     settingsMap.logo = settingsMap.logoUrl as string;
-  }
-  if (typeof settingsMap.logo === "string") {
-    settingsMap.logo = normalizeStoredLogoReference(settingsMap.logo);
   }
 
   // Construct BusinessSettings with sane defaults; unified single 'logo' field
@@ -130,15 +105,17 @@ publicRoutes.get("/public/invoices/:share_token/pdf", async (c) => {
     companyAddress: settingsMap.companyAddress || "",
     companyCity: settingsMap.companyCity || "",
     companyPostalCode: settingsMap.companyPostalCode || "",
-    companyCountryCode: settingsMap.companyCountryCode ||
-      settingsMap.countryCode || "",
+    companyCountryCode: settingsMap.companyCountryCode || "",
     postalCityFormat: settingsMap.postalCityFormat || "auto",
     companyEmail: settingsMap.companyEmail || "",
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
+    companyCountryCode: settingsMap.companyCountryCode || settingsMap.countryCode || "",
     currency: settingsMap.currency || "USD",
-    taxLabel: settingsMap.taxLabel || undefined,
+      taxLabel: settingsMap.taxLabel || undefined,
     logo: settingsMap.logo,
+    // pass-through layout controls
+    // brandLayout removed; always treating as logo-left in rendering
     paymentMethods: settingsMap.paymentMethods || "Bank Transfer",
     bankAccount: settingsMap.bankAccount || "",
     paymentTerms: settingsMap.paymentTerms || "Due in 30 days",
@@ -163,8 +140,7 @@ publicRoutes.get("/public/invoices/:share_token/pdf", async (c) => {
   }
 
   try {
-    const embedXml =
-      String(settingsMap.embedXmlInPdf || "false").toLowerCase() === "true";
+    const embedXml = String(settingsMap.embedXmlInPdf || "false").toLowerCase() === "true";
     const xmlProfileId = settingsMap.xmlProfileId || "ubl21";
     const pdfBuffer = await generatePDF(
       invoice,
@@ -185,16 +161,12 @@ publicRoutes.get("/public/invoices/:share_token/pdf", async (c) => {
     try {
       const { PDFDocument } = await import("pdf-lib");
       const doc = await PDFDocument.load(pdfBuffer);
-      const maybe = (
-        doc as unknown as { getAttachments?: () => Record<string, Uint8Array> }
-      ).getAttachments?.();
+      const maybe = (doc as unknown as { getAttachments?: () => Record<string, Uint8Array> }).getAttachments?.();
       if (maybe && typeof maybe === "object") {
         attachmentNames = Object.keys(maybe);
         hasAttachment = attachmentNames.length > 0;
       }
-    } catch (_e) {
-      /* ignore */
-    }
+    } catch (_e) { /* ignore */ }
     return new Response(pdfBuffer, {
       headers: {
         "Content-Type": "application/pdf",
@@ -202,12 +174,7 @@ publicRoutes.get("/public/invoices/:share_token/pdf", async (c) => {
           invoice.invoiceNumber || shareToken
         }.pdf"`,
         "X-Robots-Tag": "noindex",
-        ...(hasAttachment
-          ? {
-            "X-Embedded-XML": "true",
-            "X-Embedded-XML-Names": attachmentNames.join(","),
-          }
-          : { "X-Embedded-XML": "false" }),
+        ...(hasAttachment ? { "X-Embedded-XML": "true", "X-Embedded-XML-Names": attachmentNames.join(",") } : { "X-Embedded-XML": "false" }),
       },
     });
   } catch (e) {
@@ -226,24 +193,14 @@ publicRoutes.get("/public/invoices/:share_token/html", async (c) => {
   }
 
   const settings = getSettings();
-  const settingsMap = settings.reduce(
-    (acc: Record<string, string>, s) => {
-      acc[s.key] = s.value;
-      return acc;
-    },
-    {} as Record<string, string>,
-  );
-  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) {
-    settingsMap.postalCityFormat = settingsMap.postal_city_format;
-  }
-  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) {
-    settingsMap.postalCityFormat = settingsMap.postalcityformat;
-  }
+  const settingsMap = settings.reduce((acc: Record<string, string>, s) => {
+    acc[s.key] = s.value;
+    return acc;
+  }, {} as Record<string, string>);
+  if (!settingsMap.postalCityFormat && settingsMap.postal_city_format) settingsMap.postalCityFormat = settingsMap.postal_city_format;
+  if (!settingsMap.postalCityFormat && settingsMap.postalcityformat) settingsMap.postalCityFormat = settingsMap.postalcityformat;
   if (!settingsMap.logo && settingsMap.logoUrl) {
     settingsMap.logo = settingsMap.logoUrl as string;
-  }
-  if (typeof settingsMap.logo === "string") {
-    settingsMap.logo = normalizeStoredLogoReference(settingsMap.logo);
   }
 
   const businessSettings = {
@@ -251,15 +208,17 @@ publicRoutes.get("/public/invoices/:share_token/html", async (c) => {
     companyAddress: settingsMap.companyAddress || "",
     companyCity: settingsMap.companyCity || "",
     companyPostalCode: settingsMap.companyPostalCode || "",
-    companyCountryCode: settingsMap.companyCountryCode ||
-      settingsMap.countryCode || "",
+    companyCountryCode: settingsMap.companyCountryCode || "",
     postalCityFormat: settingsMap.postalCityFormat || "auto",
     companyEmail: settingsMap.companyEmail || "",
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
+    companyCountryCode: settingsMap.companyCountryCode ||
+      settingsMap.countryCode || "",
     currency: settingsMap.currency || "USD",
-    taxLabel: settingsMap.taxLabel || undefined,
+      taxLabel: settingsMap.taxLabel || undefined,
     logo: settingsMap.logo,
+    // brandLayout removed; always treating as logo-left in rendering
     paymentMethods: settingsMap.paymentMethods || "Bank Transfer",
     bankAccount: settingsMap.bankAccount || "",
     paymentTerms: settingsMap.paymentTerms || "Due in 30 days",
@@ -274,14 +233,11 @@ publicRoutes.get("/public/invoices/:share_token/html", async (c) => {
   if (
     selectedTemplateId === "professional" ||
     selectedTemplateId === "professional-modern"
-  ) {
-    selectedTemplateId = "professional-modern";
-  } else if (
+  ) selectedTemplateId = "professional-modern";
+  else if (
     selectedTemplateId === "minimalist" ||
     selectedTemplateId === "minimalist-clean"
-  ) {
-    selectedTemplateId = "minimalist-clean";
-  }
+  ) selectedTemplateId = "minimalist-clean";
 
   const html = buildInvoiceHTML(
     invoice,
@@ -311,13 +267,10 @@ publicRoutes.get("/public/invoices/:share_token/ubl.xml", async (c) => {
   }
 
   const settings = getSettings();
-  const settingsMap = settings.reduce(
-    (acc: Record<string, string>, s) => {
-      acc[s.key] = s.value;
-      return acc;
-    },
-    {} as Record<string, string>,
-  );
+  const settingsMap = settings.reduce((acc: Record<string, string>, s) => {
+    acc[s.key] = s.value;
+    return acc;
+  }, {} as Record<string, string>);
 
   const businessSettings = {
     companyName: settingsMap.companyName || "Your Company",
@@ -329,7 +282,7 @@ publicRoutes.get("/public/invoices/:share_token/ubl.xml", async (c) => {
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
     currency: settingsMap.currency || "USD",
-    taxLabel: settingsMap.taxLabel || undefined,
+      taxLabel: settingsMap.taxLabel || undefined,
     logo: settingsMap.logo,
     paymentMethods: settingsMap.paymentMethods || "Bank Transfer",
     bankAccount: settingsMap.bankAccount || "",
@@ -365,13 +318,10 @@ publicRoutes.get("/public/invoices/:share_token/xml", async (c) => {
   if (!invoice) return c.json({ message: "Invoice not found" }, 404);
 
   const settings = getSettings();
-  const settingsMap = settings.reduce(
-    (acc: Record<string, string>, s) => {
-      acc[s.key] = s.value;
-      return acc;
-    },
-    {} as Record<string, string>,
-  );
+  const settingsMap = settings.reduce((acc: Record<string, string>, s) => {
+    acc[s.key] = s.value;
+    return acc;
+  }, {} as Record<string, string>);
 
   const businessSettings = {
     companyName: settingsMap.companyName || "Your Company",
@@ -380,7 +330,7 @@ publicRoutes.get("/public/invoices/:share_token/xml", async (c) => {
     companyPhone: settingsMap.companyPhone || "",
     companyTaxId: settingsMap.companyTaxId || "",
     currency: settingsMap.currency || "USD",
-    taxLabel: settingsMap.taxLabel || undefined,
+      taxLabel: settingsMap.taxLabel || undefined,
     logo: settingsMap.logo,
     paymentMethods: settingsMap.paymentMethods || "Bank Transfer",
     bankAccount: settingsMap.bankAccount || "",
@@ -390,28 +340,20 @@ publicRoutes.get("/public/invoices/:share_token/xml", async (c) => {
   };
 
   const url = new URL(c.req.url);
-  const profileParam = url.searchParams.get("profile") ||
-    settingsMap.xmlProfileId || undefined;
-  const { xml, profile } = generateInvoiceXML(
-    profileParam,
-    invoice,
-    businessSettings,
-    {
-      sellerEndpointId: settingsMap.peppolSellerEndpointId,
-      sellerEndpointSchemeId: settingsMap.peppolSellerEndpointSchemeId,
-      buyerEndpointId: settingsMap.peppolBuyerEndpointId,
-      buyerEndpointSchemeId: settingsMap.peppolBuyerEndpointSchemeId,
-      sellerCountryCode: settingsMap.companyCountryCode,
-      buyerCountryCode: invoice.customer.countryCode,
-    },
-  );
+  const profileParam = url.searchParams.get("profile") || settingsMap.xmlProfileId || undefined;
+  const { xml, profile } = generateInvoiceXML(profileParam, invoice, businessSettings, {
+    sellerEndpointId: settingsMap.peppolSellerEndpointId,
+    sellerEndpointSchemeId: settingsMap.peppolSellerEndpointSchemeId,
+    buyerEndpointId: settingsMap.peppolBuyerEndpointId,
+    buyerEndpointSchemeId: settingsMap.peppolBuyerEndpointSchemeId,
+    sellerCountryCode: settingsMap.companyCountryCode,
+    buyerCountryCode: invoice.customer.countryCode,
+  });
 
   return new Response(xml, {
     headers: {
       "Content-Type": `${profile.mediaType}; charset=utf-8`,
-      "Content-Disposition": `attachment; filename="invoice-${
-        invoice.invoiceNumber || shareToken
-      }.${profile.fileExtension}"`,
+      "Content-Disposition": `attachment; filename="invoice-${invoice.invoiceNumber || shareToken}.${profile.fileExtension}"`,
       "X-Robots-Tag": "noindex",
     },
   });
