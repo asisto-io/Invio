@@ -5,7 +5,6 @@ export interface AuthUser {
   displayName?: string;
   isAdmin: boolean;
   isActive: boolean;
-  twoFactorEnabled?: boolean;
   permissions: Array<{ resource: string; action: string }>;
 }
 

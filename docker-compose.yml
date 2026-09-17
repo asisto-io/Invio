@@ -1,16 +1,38 @@
 name: invio
 
 services:
-  invio:
-    # Fork deploys this repo via Dokploy; build locally instead of pulling
-    # ghcr.io/kittendevv/invio so asisto-io customizations actually ship.
-    build: .
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      ADMIN_USER: ${ADMIN_USER}
+      ADMIN_PASS: ${ADMIN_PASS}
+      JWT_SECRET: ${JWT_SECRET}
+      DATABASE_PATH: ${DATABASE_PATH:-/app/data/invio.db}
     volumes:
       - invio_data:/app/data
     ports:
-      - "8000:8000"
+      - "${BACKEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      additional_contexts:
+        repo_root: .
+    env_file:
+      - .env
+    environment:
+      PORT: ${FRONTEND_PORT_INTERNAL:-8000}
+      BACKEND_URL: ${BACKEND_URL:-http://backend:3000}
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8000}:${FRONTEND_PORT_INTERNAL:-8000}"
     restart: unless-stopped
 
 volumes:

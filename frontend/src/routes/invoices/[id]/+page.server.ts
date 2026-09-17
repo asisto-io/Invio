@@ -6,7 +6,6 @@ import {
 } from "$lib/backend";
 import { error, redirect, fail } from "@sveltejs/kit";
 import type { PageServerLoad, Actions } from "./$types";
-import { env } from "$env/dynamic/private";
 
 export const load: PageServerLoad = async ({ params, locals, url }) => {
   if (!locals.authHeader) {
@@ -14,27 +13,12 @@ export const load: PageServerLoad = async ({ params, locals, url }) => {
   }
 
   try {
-    const [invoiceRes, settingsRes] = await Promise.allSettled([
-      backendGet(`/api/v1/invoices/` + params.id, locals.authHeader),
-      backendGet("/api/v1/settings", locals.authHeader),
-    ]);
-    if (invoiceRes.status !== "fulfilled") {
-      throw error(404, "Invoice not found");
-    }
-    const settings =
-      settingsRes.status === "fulfilled"
-        ? (settingsRes.value as Record<string, unknown>)
-        : {};
-    const allowProtectedInvoiceChanges =
-      String(settings.allowProtectedInvoiceChanges || "false").toLowerCase() ===
-      "true";
+    const invoice = await backendGet(
+      `/api/v1/invoices/` + params.id,
+      locals.authHeader,
+    );
     const showPublishedBanner = url.searchParams.get("published") === "1";
-    return {
-      invoice: invoiceRes.value,
-      showPublishedBanner,
-      allowProtectedInvoiceChanges,
-      emailEnabled: Boolean(env.SMTP_HOST && env.EMAIL_FROM_ADDRESS),
-    };
+    return { invoice, showPublishedBanner };
   } catch (err: any) {
     throw error(404, "Invoice not found");
   }
@@ -74,11 +58,8 @@ export const actions: Actions = {
         throw redirect(303, `/invoices/${id}`);
       }
       if (intent === "mark-paid") {
-        const paymentMethod =
-          data.get("paymentMethod")?.toString().trim() || undefined;
         await backendPut(`/api/v1/invoices/${id}`, locals.authHeader, {
           status: "paid",
-          ...(paymentMethod ? { paymentMethod } : {}),
         });
         throw redirect(303, `/invoices/${id}`);
       }
@@ -103,34 +84,6 @@ export const actions: Actions = {
       if (intent === "void") {
         await backendPost(`/api/v1/invoices/${id}/void`, locals.authHeader, {});
         throw redirect(303, `/invoices/${id}`);
-      }
-      if (intent === "send-email") {
-        const toRaw = String(data.get("emailTo") ?? "").trim();
-        const subject = String(data.get("emailSubject") ?? "").trim();
-        const message = String(data.get("emailMessage") ?? "").trim();
-
-        const to = toRaw
-          .split(",")
-          .map((e) => e.trim())
-          .filter((e) => e.includes("@"));
-
-        if (to.length === 0) {
-          return fail(400, { emailError: "Enter at least one valid recipient email address." });
-        }
-        if (!subject) {
-          return fail(400, { emailError: "Subject is required." });
-        }
-
-        try {
-          await backendPost(`/api/v1/invoices/${id}/send-email`, locals.authHeader, {
-            to,
-            subject,
-            message,
-          });
-          return { emailSent: true, emailRecipients: to };
-        } catch (e) {
-          return fail(502, { emailError: `Failed to send: ${String(e)}` });
-        }
       }
     } catch (e) {
       if (e && typeof e === "object" && "status" in e && "location" in e) {
